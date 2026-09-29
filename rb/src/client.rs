@@ -1,29 +1,20 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use uuid::Uuid;
 
 pub struct Client {
     pub addr: String,
     pub id: Uuid,
     // username: String, // To be added when authentication is implemented
-    pub tcp: Option<TcpStream>,
     pub should_disconnect: Arc<AtomicBool>, // New field to signal disconnection
 }
 
 impl Client {
-    pub fn new(stream: TcpStream) -> Client {
-        let addr = match stream.peer_addr() {
-            Ok(addr) => addr.to_string(),
-            Err(_) => "unknown".to_string(),
-        };
-        let id = Uuid::new_v4();
-
+    pub fn new(addr: impl Into<String>) -> Client {
         Client {
-            addr,
-            id,
-            tcp: Some(stream),
+            addr: addr.into(),
+            id: Uuid::new_v4(),
             should_disconnect: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -34,10 +25,6 @@ impl Client {
 
     pub fn addr(&self) -> &str {
         &self.addr
-    }
-
-    pub fn take_tcp(&mut self) -> Option<TcpStream> {
-        self.tcp.take()
     }
 
     // New method to check if client should disconnect
@@ -56,7 +43,6 @@ impl fmt::Debug for Client {
         f.debug_struct("Client")
             .field("id", &self.id)
             .field("addr", &self.addr)
-            .field("has_tcp", &self.tcp.is_some())
             .field("should_disconnect", &self.should_disconnect())
             .finish()
     }
@@ -68,7 +54,6 @@ impl Clone for Client {
         Client {
             addr: self.addr.clone(),
             id: self.id,
-            tcp: None,
             should_disconnect: self.should_disconnect.clone(), // Clone the Arc
         }
     }

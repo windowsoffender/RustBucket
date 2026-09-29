@@ -5,19 +5,19 @@ use futures::{SinkExt, StreamExt};
 use rb::client::Client;
 use rb::command::CommandContext;
 use rb::listener::http_listener::HttpListener;
-use rustls::server::Acceptor;
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use uuid::Uuid;
 
 use rb::command::CommandRegistry;
-use rb::message::{CommandRequest, CommandResult};
+use rb::message::{CommandError, CommandRequest, CommandResult};
 use rb::session::SessionManager;
 
 pub struct RbServer {
@@ -100,7 +100,7 @@ impl RbServer {
                     Ok(Ok((socket, addr))) => {
                         log::info!("New connection from: {}", addr);
 
-                        let client = Client::new(socket);
+                        let client = Client::new(addr.to_string());
                         let client_id = client.id();
 
                         clients.insert(client_id, client.clone());
@@ -114,8 +114,8 @@ impl RbServer {
                         // Spawn and store the client handler
                         let handler = tokio::spawn(async move {
                             if let Err(e) = Self::handle_client(
+                                socket,
                                 client,
-                                client_id,
                                 client_list,
                                 session_manager,
                                 listeners_clone,
@@ -189,10 +189,9 @@ impl RbServer {
         let handle = tokio::spawn(async move {
             while running.load(Ordering::SeqCst) {
                 match listener.accept().await {
-                    Ok((mut stream, addr)) => {
+                    Ok((stream, addr)) => {
                         log::info!("New TLS connection attempt from: {}", addr);
 
-                        let mut acceptor = Acceptor::default();
                         let test_pki = test_pki.clone();
                         let crl_path = crl_path.clone();
 
@@ -204,85 +203,29 @@ impl RbServer {
                         let listeners_clone = listeners.clone();
 
                         tokio::spawn(async move {
-                            // Read TLS packets until we've consumed a full client hello
-                            let accepted = loop {
-                                // Use tokio's AsyncReadExt to read into a buffer first
-                                let mut buf = vec![0u8; 8192]; // Reasonable buffer size
-                                match stream.read(&mut buf).await {
-                                    Ok(0) => {
-                                        // Connection closed
-                                        log::error!("Connection closed during TLS handshake");
-                                        return;
-                                    }
-                                    Ok(n) => {
-                                        // Feed the data into the acceptor
-                                        if let Err(e) = acceptor.read_tls(&mut &buf[..n]) {
-                                            log::error!("Error reading TLS hello: {}", e);
-                                            return;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::error!("Error reading from socket: {}", e);
-                                        return;
-                                    }
-                                }
+                            // Build a fresh server config (reads the latest CRL from disk) and
+                            // complete the handshake.
+                            let config = test_pki.server_config(&crl_path);
+                            let acceptor = TlsAcceptor::from(config);
 
-                                match acceptor.accept() {
-                                    Ok(Some(accepted)) => break accepted,
-                                    Ok(None) => continue,
-                                    Err((e, mut alert)) => {
-                                        // Write the alert to the stream using AsyncWriteExt
-                                        let mut alert_bytes = Vec::new();
-                                        if let Err(write_err) = alert.write_all(&mut alert_bytes) {
-                                            log::error!("Failed to write alert: {}", write_err);
-                                        }
-                                        // Send alert bytes via tokio's AsyncWriteExt
-                                        if let Err(send_err) = stream.write_all(&alert_bytes).await
-                                        {
-                                            log::error!("Failed to send alert: {}", send_err);
-                                        }
-                                        log::error!("Error accepting connection: {}", e);
-                                        return;
-                                    }
-                                }
-                            };
-
-                            // Generate a server config for the accepted connection
-                            let config = test_pki.server_config(&crl_path, accepted.client_hello());
-
-                            // Complete the TLS handshake - we need to convert the rustls::ServerConfig to tokio_rustls::ServerConfig
-                            let tls_stream = match accepted.into_connection(config.clone()) {
-                                Ok(conn) => conn,
-                                Err((e, mut alert)) => {
-                                    // Write the alert using standard Write first
-                                    let mut alert_bytes = Vec::new();
-                                    if let Err(write_err) = alert.write_all(&mut alert_bytes) {
-                                        log::error!("Failed to write alert: {}", write_err);
-                                    }
-                                    // Send the alert bytes using tokio's AsyncWriteExt
-                                    if let Err(send_err) = stream.write_all(&alert_bytes).await {
-                                        log::error!("Failed to send alert: {}", send_err);
-                                    }
-                                    log::error!("Error completing TLS handshake: {}", e);
+                            let tls_stream = match acceptor.accept(stream).await {
+                                Ok(tls_stream) => tls_stream,
+                                Err(e) => {
+                                    log::error!("TLS handshake failed with {}: {}", addr, e);
                                     return;
                                 }
                             };
 
-                            // TLS connection established, use it to create a client
                             log::info!("TLS connection established with: {}", addr);
 
-                            // We currently can't directly create a Client with a TLS stream
-                            // since Client::new expects TcpStream. We'd need to modify the Client
-                            // struct to accept different types of streams, but for now let's
-                            // use what we have.
-                            let client = Client::new(stream);
+                            let client = Client::new(addr.to_string());
                             let client_id = client.id();
 
                             clients_clone.insert(client_id, client.clone());
 
                             if let Err(e) = Self::handle_client(
+                                tls_stream,
                                 client,
-                                client_id,
                                 clients_clone,
                                 session_manager,
                                 listeners_clone,
@@ -308,23 +251,24 @@ impl RbServer {
         Ok(())
     }
 
-    async fn handle_client(
-        mut client: Client,
-        client_id: Uuid,
+    async fn handle_client<S>(
+        stream: S,
+        client: Client,
         // clients: Arc<Mutex<Vec<Client>>>,
         clients: Arc<DashMap<Uuid, Client>>,
         session_manager: Arc<RwLock<SessionManager>>,
         listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<HttpListener>>>>>>,
         running: Arc<AtomicBool>,
         command_registry: Arc<CommandRegistry>,
-    ) -> io::Result<()> {
+    ) -> io::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let client_id = client.id();
         log::debug!("Handling client: {}", client.addr());
 
-        // Extract the TCP stream first
-        let mut tcp_stream = client.take_tcp().unwrap();
-
-        // Then split it to avoid ownership issues
-        let (reader, writer) = tcp_stream.split();
+        // Split the transport so we can read and write independently.
+        let (reader, writer) = tokio::io::split(stream);
 
         let mut stream = FramedRead::new(reader, LinesCodec::new());
         let mut sink = FramedWrite::new(writer, LinesCodec::new());
@@ -349,8 +293,16 @@ impl RbServer {
                         Ok(request) => request,
                         Err(e) => {
                             log::error!("Failed to parse command request: {}", e);
-                            let error_response =
-                                format!("{{\"error\": \"Failed to parse command request: {}\"}}", e);
+                            let error_response = serde_json::to_string(
+                                &CommandError::InvalidArguments(format!(
+                                    "Failed to parse command request: {}",
+                                    e
+                                )),
+                            )
+                            .unwrap_or_else(|_| {
+                                r#"{"InvalidArguments":"Failed to parse command request"}"#
+                                    .to_string()
+                            });
                             if let Err(e) = sink.send(error_response).await {
                                 log::error!("Failed to send error response to client: {}", e);
                                 break;
@@ -365,16 +317,14 @@ impl RbServer {
 
                     // Serialize the result
                     let serialized = match result {
-                        Ok(output) => {
-                            serde_json::to_string(&output).unwrap_or_else(|e| {
-                                format!("{{\"error\": \"Failed to serialize output: {}\"}}", e)
-                            })
-                        }
-                        Err(err) => {
-                            serde_json::to_string(&err).unwrap_or_else(|e| {
-                                format!("{{\"error\": \"Failed to serialize error: {}\"}}", e)
-                            })
-                        }
+                        Ok(output) => serde_json::to_string(&output).unwrap_or_else(|e| {
+                            log::error!("Failed to serialize output: {}", e);
+                            r#"{"Internal":"Failed to serialize output"}"#.to_string()
+                        }),
+                        Err(err) => serde_json::to_string(&err).unwrap_or_else(|e| {
+                            log::error!("Failed to serialize error: {}", e);
+                            r#"{"Internal":"Failed to serialize error"}"#.to_string()
+                        }),
                     };
 
                     // Send the serialized result to the client

@@ -5,6 +5,7 @@ use crate::message::*;
 
 use super::get_arg_matches;
 use clap;
+use uuid::Uuid;
 
 #[derive(Debug)]
 struct ListenerArgs {
@@ -189,54 +190,40 @@ impl RbCommand for ServerListenersCommand {
                         match listener_type.to_lowercase().as_str() {
                             "http" => {
                                 // Create a new HTTP listener
-                                let mut new_listener = HttpListener::new(
+                                let new_listener = HttpListener::new(
                                     format!("HTTP_{}:{}", bind_address, port).as_str(),
                                     socket_addr,
                                     context.session_manager.clone(),
                                 );
 
-                                // Get the mutex-protected listeners map
-                                let listeners = context.listeners.clone();
-                                let listeners_guard = match listeners.lock() {
-                                    Ok(guard) => guard,
-                                    Err(poisoned) => poisoned.into_inner(), // Handle poisoned mutex
-                                };
-
-                                // Store the listener ID before starting
                                 let listener_id = new_listener.id();
                                 let listener_name = new_listener.name().to_string();
 
-                                // Instead of creating a new runtime, we'll spawn a task that will:
-                                // 1. Start the listener
-                                // 2. Update our command output via a channel
+                                let listener_arc = Arc::new(Mutex::new(Box::new(new_listener)));
 
-                                // Create a oneshot channel to get the result
-                                let (tx, rx) = tokio::sync::oneshot::channel();
+                                // Register the listener before starting it so `listeners list`
+                                // sees it immediately.
+                                {
+                                    let listeners = context.listeners.clone();
+                                    let mut listeners_guard = match listeners.lock() {
+                                        Ok(guard) => guard,
+                                        Err(poisoned) => poisoned.into_inner(),
+                                    };
+                                    listeners_guard.insert(listener_id, listener_arc.clone());
+                                }
 
-                                // Clone values needed for the closure
-                                let listeners_clone = context.listeners.clone();
-
-                                // Spawn the task to start the listener
-                                tokio::spawn(async move {
-                                    match new_listener.start().await {
-                                        Ok(_) => {
-                                            // Insert the listener into the map
-                                            if let Ok(mut map) = listeners_clone.lock() {
-                                                map.insert(
-                                                    listener_id,
-                                                    Arc::new(Mutex::new(Box::new(new_listener))),
-                                                );
-                                            }
-
-                                            // Send success result
-                                            let _ = tx.send(Ok(()));
+                                // Start it now. `start` only spawns the actix server and returns.
+                                if let Ok(mut guard) = listener_arc.lock() {
+                                    if let Err(e) = guard.start() {
+                                        if let Ok(mut map) = context.listeners.lock() {
+                                            map.remove(&listener_id);
                                         }
-                                        Err(e) => {
-                                            // Send error result
-                                            let _ = tx.send(Err(e));
-                                        }
+                                        return Err(CommandError::ExecutionFailed(format!(
+                                            "Failed to start listener: {}",
+                                            e
+                                        )));
                                     }
-                                });
+                                }
 
                                 Ok(CommandOutput::Text(format!(
                                     "HTTP listener '{}' starting on {}:{} (ID: {})",
@@ -266,48 +253,38 @@ impl RbCommand for ServerListenersCommand {
                             }
                         };
 
-                        let listeners = context.listeners.clone();
-
-                        // Lock the mutex to access the HashMap
-                        let listeners_guard = match listeners.lock() {
-                            Ok(guard) => guard,
-                            Err(poisoned) => poisoned.into_inner(), // Handle poisoned mutex
+                        let listener_id = match Uuid::parse_str(id) {
+                            Ok(uuid) => uuid,
+                            Err(_) => {
+                                return Err(CommandError::ExecutionFailed(format!(
+                                    "Invalid listener ID: {}",
+                                    id
+                                )))
+                            }
                         };
 
-                        // Check if listener exists
-                        // if let Some(listener_arc) = listeners_guard.get(id) {
-                        //     // Try to lock the listener to stop it
-                        //     if let Ok(mut listener) = listener_arc.lock() {
-                        //         // Create runtime to run async stop method
-                        //         let rt = Runtime::new().unwrap();
-                        //
-                        //         // Call stop method and wait for result
-                        //         return rt.block_on(async {
-                        //             match listener.stop().await {
-                        //                 Ok(_) => Ok(()),
-                        //                 Err(e) => Err(format!("Failed to stop listener: {}", e)),
-                        //             }
-                        //         });
-                        //     } else {
-                        //         return Err("Unable to access listener".to_string());
-                        //     }
-                        // } else {
-                        //     return Err(format!("Listener with ID '{}' not found", id));
-                        // }
+                        let listeners = context.listeners.clone();
 
-                        // Stop the listener using context
-                        // match context.stop_listener(id) {
-                        //     Ok(_) => Ok(CommandOutput::Text(format!(
-                        //         "Listener with ID {} stopped",
-                        //         id
-                        //     ))),
-                        //     Err(e) => Err(CommandError::ExecutionFailed(format!(
-                        //         "Failed to stop listener: {}",
-                        //         e
-                        //     ))),
-                        // }
+                        let mut listeners_guard = match listeners.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
 
-                        Ok(CommandOutput::Text("meowmeow".to_string()))
+                        match listeners_guard.remove(&listener_id) {
+                            Some(listener_arc) => {
+                                if let Ok(mut listener) = listener_arc.lock() {
+                                    listener.request_stop();
+                                }
+                                Ok(CommandOutput::Text(format!(
+                                    "Listener {} stopped",
+                                    listener_id
+                                )))
+                            }
+                            None => Err(CommandError::TargetNotFound(format!(
+                                "Listener with ID {} not found",
+                                listener_id
+                            ))),
+                        }
                     }
                     _ => Err(CommandError::ExecutionFailed(format!(
                         "No arguments provided",

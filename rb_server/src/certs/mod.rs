@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use rcgen::KeyPair;
 use rustls::pki_types::{CertificateRevocationListDer, PrivatePkcs8KeyDer};
-use rustls::server::{ClientHello, ServerConfig, WebPkiClientVerifier};
+use rustls::server::{ServerConfig, WebPkiClientVerifier};
 use rustls::RootCertStore;
 
 /// A test PKI with a CA certificate, server certificate, and client certificate.
@@ -41,7 +41,8 @@ impl TestPki {
 
         // Create a server end entity cert issued by the CA.
         let mut server_ee_params =
-            rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+            rcgen::CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+                .unwrap();
         server_ee_params.is_ca = rcgen::IsCa::NoCa;
         server_ee_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
         let ee_key = KeyPair::generate_for(alg).unwrap();
@@ -86,10 +87,7 @@ impl TestPki {
     ///
     /// Importantly this creates a new client certificate verifier per-connection so that the server
     /// can read in the latest CRL content from disk.
-    ///
-    /// Since the presented client certificate is not available in the `ClientHello` the server
-    /// must know ahead of time which CRLs it cares about.
-    pub fn server_config(&self, crl_path: &str, _hello: ClientHello) -> Arc<ServerConfig> {
+    pub fn server_config(&self, crl_path: &str) -> Arc<ServerConfig> {
         // Read the latest CRL from disk
         let mut crl_file = File::open(crl_path).unwrap();
         let mut crl = Vec::default();
@@ -165,6 +163,11 @@ impl TestPki {
     ) {
         // Helper function to write PEM files
         let write_pem = |path: &str, pem: &str| {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+            }
             let mut file = File::create(path).unwrap();
             file.write_all(pem.as_bytes()).unwrap();
         };
@@ -177,6 +180,11 @@ impl TestPki {
         write_pem(client_key_path, &self.client_cert.key_pair.serialize_pem());
 
         // Write out an initial DER CRL that has no revoked certificates.
+        if let Some(parent) = std::path::Path::new(crl_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+        }
         let mut crl_der = File::create(crl_path).unwrap();
         crl_der
             .write_all(&self.crl(Vec::default(), crl_update_seconds))
@@ -184,12 +192,11 @@ impl TestPki {
     }
 }
 
-/// CRL updater that runs in a separate thread. This periodically updates the CRL file on disk,
-/// flipping between writing a CRL that describes the client certificate as revoked, and a CRL that
-/// describes the client certificate as not revoked.
+/// CRL updater that runs in a separate thread. This periodically refreshes the CRL file on disk.
 ///
 /// In a real use case, the CRL would be updated by fetching fresh CRL data from an authoritative
-/// distribution point.
+/// distribution point. Here we keep issuing an empty CRL (no revoked certs) so the client identity
+/// stays valid.
 pub struct CrlUpdater {
     pub sleep_duration: Duration,
     pub crl_path: PathBuf,
@@ -206,24 +213,8 @@ impl CrlUpdater {
     }
 
     pub fn run(self) {
-        let mut revoked = true;
-
         loop {
             std::thread::sleep(self.sleep_duration);
-
-            let revoked_certs = if revoked {
-                vec![self
-                    .pki
-                    .client_cert
-                    .cert
-                    .params()
-                    .serial_number
-                    .clone()
-                    .unwrap()]
-            } else {
-                Vec::default()
-            };
-            revoked = !revoked;
 
             // Write the new CRL content to a temp file, this avoids a race condition where the server
             // reads the configured CRL path while we're in the process of writing it.
@@ -231,7 +222,7 @@ impl CrlUpdater {
             tmp_path.set_extension("tmp");
             let mut crl_der = File::create(&tmp_path).unwrap();
             crl_der
-                .write_all(&self.pki.crl(revoked_certs, self.sleep_duration.as_secs()))
+                .write_all(&self.pki.crl(Vec::default(), self.sleep_duration.as_secs()))
                 .unwrap();
 
             // Once the new CRL content is available, atomically rename.

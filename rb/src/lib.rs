@@ -4,7 +4,6 @@ pub mod listener;
 pub mod message;
 pub mod session;
 pub mod task;
-pub mod payload;
 pub use client::Client;
 // pub use command::{Command, CommandError, CommandRegistry, CommandResult};
 // pub use message::CommandRequest;

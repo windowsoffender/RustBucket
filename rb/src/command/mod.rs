@@ -146,7 +146,6 @@ impl CommandRegistry {
 
             return self
                 .execute_implant_command(
-                    None,
                     context,
                     command_request.command_line.as_str(),
                     session_id,
@@ -196,16 +195,10 @@ impl CommandRegistry {
 
     async fn execute_implant_command(
         &self,
-        command: Option<&Box<dyn RbCommand>>,
         context: &mut CommandContext,
         command_line: &str,
         session_id: usize,
     ) -> CommandResult {
-        // Parse arguments with clap
-        // let args_result = command.parse_args(command_line);
-
-        // match args_result {
-        // Ok(parsed_args) => {
         // Get the session
         let session = {
             let session_manager = context.session_manager.read().unwrap();
@@ -228,10 +221,8 @@ impl CommandRegistry {
             .map(|s| s.to_string())
             .collect::<Vec<String>>();
 
-        println!("Command name: {}", command_name);
-        println!("Command args: {:?}", args);
+        log::debug!("Command name: {}, args: {:?}", command_name, args);
 
-        // let task_id = match session.create_task(command.name().to_string(), args) {
         let task_id = match session.create_task(command_name.to_string(), args) {
             Ok(id) => id,
             Err(err) => {
@@ -241,22 +232,48 @@ impl CommandRegistry {
                 )))
             }
         };
-        let timeout = 10; // seconds
+
+        let timeout = std::time::Duration::from_secs(10);
         let start_time = std::time::Instant::now();
-        while session.get_task(&task_id).unwrap().status != TaskStatus::Completed {
-            if start_time.elapsed().as_secs() > timeout {
+
+        loop {
+            match session.get_task(&task_id) {
+                Ok(task) if task.status == TaskStatus::Completed => break,
+                Ok(task)
+                    if task.status == TaskStatus::Failed
+                        || task.status == TaskStatus::Cancelled =>
+                {
+                    return Err(CommandError::ExecutionFailed(format!(
+                        "Task {} ended with status {}",
+                        task_id,
+                        task.status.to_string()
+                    )));
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    return Err(CommandError::Internal(format!(
+                        "Failed to read task {}: {}",
+                        task_id, err
+                    )))
+                }
+            }
+
+            if start_time.elapsed() > timeout {
                 return Err(CommandError::Timeout(format!(
                     "Task with ID '{}' timed out",
                     task_id
                 )));
             }
+
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        return Ok(session.get_task_result(&task_id).unwrap().output);
-        // }
-        // Err(err) => Err(CommandError::InvalidArguments(format!(
-        //     "Failed to parse arguments\n\n{}",
-        //     err
-        // ))),
-        // }
+
+        match session.get_task_result(&task_id) {
+            Ok(result) => Ok(result.output),
+            Err(err) => Err(CommandError::Internal(format!(
+                "Task {} completed without a result: {}",
+                task_id, err
+            ))),
+        }
     }
 }

