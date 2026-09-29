@@ -9,6 +9,8 @@ pub struct RbServerConfig {
     pub host: String,
     pub port: u16,
     pub verbose: bool,
+    /// Path to the SQLite database. Empty string keeps state in memory only.
+    pub db_path: String,
     pub mtls: MtlsConfig,
 }
 
@@ -30,6 +32,7 @@ impl Default for RbServerConfig {
             host: "0.0.0.0".to_string(),
             port: 6666,
             verbose: false,
+            db_path: "rustbucket.sqlite".to_string(),
             mtls: MtlsConfig::default(),
         }
     }

@@ -86,6 +86,7 @@ The server reads `rb_server.toml` from the current directory by default. Pass `-
 host = "0.0.0.0"
 port = 6666
 verbose = false
+db_path = "rustbucket.sqlite"
 
 [mtls]
 enabled = false
@@ -96,11 +97,11 @@ crl_path = "certs/crl.der"
 crl_update_seconds = 5
 ```
 
+Sessions, tasks, results and listener definitions are saved to the SQLite database at `db_path`, so they survive a restart. HTTP listeners are automatically bound again on startup. Set `db_path = ""` to keep everything in memory.
+
 # TODO
 
-- Cleaner state management (and cleaner code in general).
 - Implement actual commands to do stuff instead of just powershell commands.
 - Nicer cli experience (tab completion, syntax highlighting, etc).
-- A DB to save server state.
 - Operator profiles and a command to generate them.
 - Make server send the generated payload to the client (currently it just stays on the server).

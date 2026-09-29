@@ -3,10 +3,13 @@ mod config;
 // mod context;
 // mod handler;
 mod server;
-// mod server;
+mod store;
 
 use clap::Parser;
+use rb::store::memory::MemoryStore;
+use rb::store::Store;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::signal;
 
 /// Operator server for RustBucket.
@@ -24,6 +27,10 @@ struct Args {
     /// Port to bind the operator server to
     #[arg(short, long)]
     port: Option<u16>,
+
+    /// Path to the SQLite database (empty string disables persistence)
+    #[arg(long)]
+    db_path: Option<String>,
 
     /// Enable mutual TLS on the operator channel
     #[arg(long)]
@@ -71,6 +78,9 @@ async fn main() {
     if let Some(port) = args.port {
         conf.port = port;
     }
+    if let Some(path) = args.db_path {
+        conf.db_path = path;
+    }
     if args.mtls {
         conf.mtls.enabled = true;
     }
@@ -87,6 +97,23 @@ async fn main() {
         conf.mtls.crl_path = path;
     }
 
+    // Build the state store: SQLite when a path is configured, otherwise in-memory.
+    let store: Arc<dyn Store> = if conf.db_path.trim().is_empty() {
+        log::info!("Using in-memory state store (persistence disabled)");
+        Arc::new(MemoryStore::new())
+    } else {
+        match store::SqliteStore::open(&conf.db_path) {
+            Ok(store) => {
+                log::info!("Using SQLite state store at {}", conf.db_path);
+                Arc::new(store)
+            }
+            Err(e) => {
+                eprintln!("Failed to open database {}: {}", conf.db_path, e);
+                return;
+            }
+        }
+    };
+
     log::info!(
         "Starting server on {}:{} (mTLS: {})",
         conf.host,
@@ -95,7 +122,7 @@ async fn main() {
     );
 
     // Create the C2 server and start it
-    let c2 = server::RbServer::new(conf);
+    let c2 = server::RbServer::new(conf, store);
 
     match c2.start().await {
         Ok(_) => {

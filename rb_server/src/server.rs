@@ -5,10 +5,11 @@ use futures::{SinkExt, StreamExt};
 use rb::client::Client;
 use rb::command::CommandContext;
 use rb::listener::http_listener::HttpListener;
+use rb::store::Store;
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -18,7 +19,6 @@ use uuid::Uuid;
 
 use rb::command::CommandRegistry;
 use rb::message::{CommandError, CommandRequest, CommandResult};
-use rb::session::SessionManager;
 
 pub struct RbServer {
     config: RbServerConfig,
@@ -27,34 +27,27 @@ pub struct RbServer {
     // listeners: Arc<Mutex<Vec<Box<dyn Listener>>>>,
     // listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<dyn Listener>>>>>>,
     listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<HttpListener>>>>>>,
-    // sessions: Arc<Mutex<Vec<Session>>>,
-    // sessions: Arc<std::sync::RwLock<HashMap<Uuid, Arc<Session>>>>,
-    session_manager: Arc<RwLock<SessionManager>>,
+    store: Arc<dyn Store>,
     running: Arc<AtomicBool>,
     server_task: Mutex<Option<JoinHandle<()>>>,
     command_registry: Arc<CommandRegistry>,
 }
 
 impl RbServer {
-    /// Create a new RbServer instance with the given configuration
-    pub fn new(config: RbServerConfig) -> Self {
+    /// Create a new RbServer instance with the given configuration and state store
+    pub fn new(config: RbServerConfig, store: Arc<dyn Store>) -> Self {
         RbServer {
             config,
             // clients: Arc::new(Mutex::new(Vec::new())),
             clients: Arc::new(DashMap::new()),
             client_handlers: Arc::new(Mutex::new(Vec::new())),
             listeners: Arc::new(Mutex::new(HashMap::new())),
-            // sessions: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            session_manager: Arc::new(RwLock::new(SessionManager::new())),
-            // listeners_manager: Arc::new(RwLock::new(ListenersManager::new())), // yet to implement this
+            store,
             running: Arc::new(AtomicBool::new(false)),
             server_task: Mutex::new(None),
             command_registry: Arc::new(CommandRegistry::new()),
         }
     }
-    // pub fn session_manager(&self) -> Arc<RwLock<SessionManager>> {
-    //     self.session_manager.clone()
-    // }
 
     /// Start the C2 server
     pub async fn start(&self) -> io::Result<()> {
@@ -74,7 +67,52 @@ impl RbServer {
             self.start_plain_server(&addr).await?;
         }
 
+        // Bring persisted listeners back up so implants can reconnect.
+        self.restore_listeners();
+
         Ok(())
+    }
+
+    /// Rebuild persisted HTTP listeners and bind them again.
+    fn restore_listeners(&self) {
+        for record in self.store.list_listeners() {
+            if record.listener_type != "http" {
+                log::warn!(
+                    "Skipping listener {} with unsupported type '{}'",
+                    record.id,
+                    record.listener_type
+                );
+                continue;
+            }
+
+            let addr_string = format!("{}:{}", record.bind_address, record.port);
+            let addr: std::net::SocketAddr = match addr_string.parse() {
+                Ok(addr) => addr,
+                Err(_) => {
+                    log::error!(
+                        "Listener {} has an invalid address: {}",
+                        record.id,
+                        addr_string
+                    );
+                    continue;
+                }
+            };
+
+            let mut listener =
+                HttpListener::with_id(record.id, &record.name, addr, self.store.clone());
+
+            match listener.start() {
+                Ok(_) => {
+                    log::info!("Restored listener '{}' on {}", record.name, addr);
+                    if let Ok(mut map) = self.listeners.lock() {
+                        map.insert(record.id, Arc::new(Mutex::new(Box::new(listener))));
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to restore listener '{}': {}", record.id, e);
+                }
+            }
+        }
     }
 
     /// Start a non-TLS server
@@ -84,7 +122,7 @@ impl RbServer {
 
         let running = self.running.clone();
         let clients = self.clients.clone();
-        let session_manager = self.session_manager.clone();
+        let store = self.store.clone();
         let command_registry = self.command_registry.clone();
         let listeners = self.listeners.clone();
         let client_handlers = self.client_handlers.clone();
@@ -106,7 +144,7 @@ impl RbServer {
                         clients.insert(client_id, client.clone());
 
                         let client_list = clients.clone();
-                        let session_manager = session_manager.clone();
+                        let store = store.clone();
                         let running_clone = running.clone();
                         let command_registry_clone = command_registry.clone();
                         let listeners_clone = listeners.clone();
@@ -117,7 +155,7 @@ impl RbServer {
                                 socket,
                                 client,
                                 client_list,
-                                session_manager,
+                                store,
                                 listeners_clone,
                                 running_clone,
                                 command_registry_clone,
@@ -181,7 +219,7 @@ impl RbServer {
         let running = self.running.clone();
         let clients = self.clients.clone();
         // let sessions = self.sessions.clone();
-        let session_manager = self.session_manager.clone();
+        let store = self.store.clone();
         let command_registry = self.command_registry.clone();
         let crl_path = self.config.mtls.crl_path.clone();
         let listeners = self.listeners.clone();
@@ -197,7 +235,7 @@ impl RbServer {
 
                         // Process the TLS handshake in a separate task
                         let clients_clone = clients.clone();
-                        let session_manager = session_manager.clone();
+                        let store = store.clone();
                         let running_clone = running.clone();
                         let command_registry_clone = command_registry.clone();
                         let listeners_clone = listeners.clone();
@@ -227,7 +265,7 @@ impl RbServer {
                                 tls_stream,
                                 client,
                                 clients_clone,
-                                session_manager,
+                                store,
                                 listeners_clone,
                                 running_clone,
                                 command_registry_clone,
@@ -256,7 +294,7 @@ impl RbServer {
         client: Client,
         // clients: Arc<Mutex<Vec<Client>>>,
         clients: Arc<DashMap<Uuid, Client>>,
-        session_manager: Arc<RwLock<SessionManager>>,
+        store: Arc<dyn Store>,
         listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<HttpListener>>>>>>,
         running: Arc<AtomicBool>,
         command_registry: Arc<CommandRegistry>,
@@ -284,7 +322,7 @@ impl RbServer {
                 Some(Ok(msg)) = stream.next() => {
                     log::info!("Received: {:?}", msg);
                     let mut cmd_context = CommandContext {
-                        session_manager: session_manager.clone(),
+                        store: store.clone(),
                         command_registry: command_registry.clone(),
                         listeners: listeners.clone(),
                     };
@@ -420,8 +458,7 @@ impl RbServer {
         self.clients.clear();
 
         // Clean up any remaining sessions
-        let session_manager = self.session_manager.write().unwrap();
-        session_manager.kill_all_sessions();
+        self.store.kill_all_sessions();
 
         log::info!("Server stopped successfully");
         Ok(())

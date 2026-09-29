@@ -6,11 +6,13 @@
 host = "0.0.0.0"
 port = 6666
 verbose = false
+# SQLite database for sessions, tasks and results. Empty string keeps state in memory only.
+db_path = "rustbucket.sqlite"
 
 [mtls]
 # Require a client certificate on the operator channel.
 # The server generates a throwaway test PKI into the paths below at startup.
-enabled = false
+enabled = true
 ca_path = "certs/ca-cert.pem"
 cert_path = "certs/client-cert.pem"
 key_path = "certs/client-key.pem"

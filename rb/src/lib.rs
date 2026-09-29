@@ -3,6 +3,7 @@ pub mod command;
 pub mod listener;
 pub mod message;
 pub mod session;
+pub mod store;
 pub mod task;
 pub use client::Client;
 // pub use command::{Command, CommandError, CommandRegistry, CommandResult};

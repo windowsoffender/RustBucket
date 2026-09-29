@@ -23,3 +23,4 @@ tokio-rustls = "0.26.2"
 toml = "0.8"
 env_logger = "0.11.7"
 dashmap = "6.1.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }

@@ -2,6 +2,8 @@
 use crate::command::*;
 use crate::listener::http_listener::HttpListener;
 use crate::message::*;
+use crate::store::ListenerInfo;
+use std::time::SystemTime;
 
 use super::get_arg_matches;
 use clap;
@@ -193,7 +195,7 @@ impl RbCommand for ServerListenersCommand {
                                 let new_listener = HttpListener::new(
                                     format!("HTTP_{}:{}", bind_address, port).as_str(),
                                     socket_addr,
-                                    context.session_manager.clone(),
+                                    context.store.clone(),
                                 );
 
                                 let listener_id = new_listener.id();
@@ -223,6 +225,23 @@ impl RbCommand for ServerListenersCommand {
                                             e
                                         )));
                                     }
+                                }
+
+                                // Persist the listener so it comes back after a server restart.
+                                let record = ListenerInfo {
+                                    id: listener_id,
+                                    name: listener_name.clone(),
+                                    listener_type: "http".to_string(),
+                                    bind_address: bind_address.clone(),
+                                    port,
+                                    created_at: SystemTime::now(),
+                                };
+                                if let Err(e) = context.store.upsert_listener(record) {
+                                    log::error!(
+                                        "Failed to persist listener {}: {}",
+                                        listener_id,
+                                        e
+                                    );
                                 }
 
                                 Ok(CommandOutput::Text(format!(
@@ -275,6 +294,8 @@ impl RbCommand for ServerListenersCommand {
                                 if let Ok(mut listener) = listener_arc.lock() {
                                     listener.request_stop();
                                 }
+                                // Drop the persisted record so it isn't restored on restart.
+                                context.store.remove_listener(&listener_id);
                                 Ok(CommandOutput::Text(format!(
                                     "Listener {} stopped",
                                     listener_id

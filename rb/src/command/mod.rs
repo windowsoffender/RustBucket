@@ -1,12 +1,12 @@
 use crate::listener::http_listener::HttpListener;
 use crate::listener::*;
 use crate::message::{CommandError, CommandRequest, CommandResult};
-use crate::session::SessionManager;
+use crate::store::Store;
 use std::any::Any;
 use std::collections::HashMap;
 use std::result::Result;
 use std::sync::Arc;
-use std::sync::{Mutex, RwLock};
+use std::sync::Mutex;
 use uuid::Uuid;
 
 use crate::task::TaskStatus;
@@ -45,8 +45,7 @@ pub trait RbCommand: Send + Sync {
 
 // Context passed to commands (can contain server state, active session, etc.)
 pub struct CommandContext {
-    // pub sessions: Arc<RwLock<HashMap<Uuid, Arc<Session>>>>,
-    pub session_manager: Arc<RwLock<SessionManager>>,
+    pub store: Arc<dyn Store>,
     // pub active_session: Option<Arc<Session>>,
     pub command_registry: Arc<CommandRegistry>,
     // pub listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<dyn Listener>>>>>>, // Should switch to a generic listener type like this later
@@ -132,10 +131,7 @@ impl CommandRegistry {
             // Execute implant command on a specific session
             // if let Some(command) = self.get_implant_command(command_name) {
             // Verify the session exists
-            let session_exists = {
-                let session_manager = context.session_manager.read().unwrap();
-                session_manager.get_session(&session_id).is_some()
-            };
+            let session_exists = context.store.get_session(&session_id).is_some();
 
             if !session_exists {
                 return Err(CommandError::TargetNotFound(format!(
@@ -199,19 +195,13 @@ impl CommandRegistry {
         command_line: &str,
         session_id: usize,
     ) -> CommandResult {
-        // Get the session
-        let session = {
-            let session_manager = context.session_manager.read().unwrap();
-            match session_manager.get_session(&session_id) {
-                Some(s) => s,
-                None => {
-                    return Err(CommandError::TargetNotFound(format!(
-                        "Session with ID '{}' not found",
-                        session_id
-                    )))
-                }
-            }
-        };
+        // Make sure the session exists before creating a task for it.
+        if context.store.get_session(&session_id).is_none() {
+            return Err(CommandError::TargetNotFound(format!(
+                "Session with ID '{}' not found",
+                session_id
+            )));
+        }
 
         let command_name = command_line.split_whitespace().next().unwrap_or("");
 
@@ -223,10 +213,10 @@ impl CommandRegistry {
 
         log::debug!("Command name: {}, args: {:?}", command_name, args);
 
-        let task_id = match session.create_task(command_name.to_string(), args) {
+        let task_id = match context.store.create_task(session_id, command_name.to_string(), args) {
             Ok(id) => id,
             Err(err) => {
-                return Err(CommandError::TargetNotFound(format!(
+                return Err(CommandError::Internal(format!(
                     "Failed to create task: {}",
                     err
                 )))
@@ -237,9 +227,9 @@ impl CommandRegistry {
         let start_time = std::time::Instant::now();
 
         loop {
-            match session.get_task(&task_id) {
-                Ok(task) if task.status == TaskStatus::Completed => break,
-                Ok(task)
+            match context.store.get_task(&task_id) {
+                Some(task) if task.status == TaskStatus::Completed => break,
+                Some(task)
                     if task.status == TaskStatus::Failed
                         || task.status == TaskStatus::Cancelled =>
                 {
@@ -249,11 +239,11 @@ impl CommandRegistry {
                         task.status.to_string()
                     )));
                 }
-                Ok(_) => {}
-                Err(err) => {
+                Some(_) => {}
+                None => {
                     return Err(CommandError::Internal(format!(
-                        "Failed to read task {}: {}",
-                        task_id, err
+                        "Task {} disappeared",
+                        task_id
                     )))
                 }
             }
@@ -268,11 +258,11 @@ impl CommandRegistry {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
 
-        match session.get_task_result(&task_id) {
-            Ok(result) => Ok(result.output),
-            Err(err) => Err(CommandError::Internal(format!(
-                "Task {} completed without a result: {}",
-                task_id, err
+        match context.store.get_result(&task_id) {
+            Some(result) => Ok(result.output),
+            None => Err(CommandError::Internal(format!(
+                "Task {} completed without a result",
+                task_id
             ))),
         }
     }

@@ -25,3 +25,9 @@ Cargo.lock
 *.pem
 *.der
 .aider*
+
+# SQLite state
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm

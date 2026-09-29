@@ -77,11 +77,8 @@ impl RbCommand for ServerSessionsCommand {
 
                 match args.action.as_str() {
                     "list" => {
-                        // Get all active sessions from context
-                        let session_manager = context.session_manager.clone();
-                        let handle = session_manager.read().unwrap();
-
-                        let sessions = handle.get_all_sessions();
+                        // Get all sessions from the store
+                        let sessions = context.store.list_sessions();
 
                         if sessions.is_empty() {
                             return Ok(CommandOutput::Text("No active sessions".to_string()));
@@ -133,11 +130,10 @@ impl RbCommand for ServerSessionsCommand {
                             }
                         };
 
-                        let session_manager = context.session_manager.clone();
-                        let handle = session_manager.write().unwrap();
+                        let session_manager = context.store.clone();
 
                         // TODO: Make `remove_session` return a Result for better error handling
-                        match handle.remove_session(&id) {
+                        match session_manager.remove_session(&id) {
                             true => Ok(CommandOutput::Text(format!(
                                 "Session with ID {} killed",
                                 id
@@ -172,9 +168,8 @@ impl RbCommand for ServerSessionsCommand {
                         };
 
                         // Check if session exists
-                        let session_manager = context.session_manager.clone();
-                        let handle = session_manager.read().unwrap();
-                        match handle.activate_session(&id) {
+                        let session_manager = context.store.clone();
+                        match session_manager.activate_session(&id) {
                             Ok(_) => {
                                 return Ok(CommandOutput::Text(format!(
                                     "Session with ID {} activated",
