@@ -13,7 +13,7 @@ use crate::task::TaskStatus;
 
 use clap;
 
-mod implant_cmds;
+pub mod implant_cmds;
 mod server_cmds;
 
 // Define command types
@@ -53,61 +53,38 @@ pub struct CommandContext {
                                                                              // HTTP listeners
 }
 
-// Command Registry that holds both server and implant commands
+// Command Registry for server-side commands. Implant command metadata lives in
+// `implant_cmds`.
 pub struct CommandRegistry {
     server_commands: HashMap<String, Box<dyn RbCommand>>,
-    implant_commands: HashMap<String, Box<dyn RbCommand>>,
 }
 
 impl CommandRegistry {
     pub fn new() -> Self {
         let mut registry = CommandRegistry {
             server_commands: HashMap::new(),
-            implant_commands: HashMap::new(),
         };
 
         // Register built-in server commands
         registry.register(Box::new(server_cmds::ServerListenersCommand {}));
         registry.register(Box::new(server_cmds::ServerSessionsCommand {}));
-        // registry.register(Box::new(ServerSessionsCommand {}));
         registry.register(Box::new(server_cmds::ServerHelpCommand {}));
         registry.register(Box::new(server_cmds::PayloadCommand {}));
-        // Register built-in implant commands
-        // registry.register(Box::new(implant_cmds::ImplantLsCommand {}));
-        // registry.register(Box::new(implant_cmds::ImplantSysteminfoCommand {}));
-        // registry.register(Box::new(implant_cmds::ImplantPwdCommand {}));
-        // registry.register(Box::new(implant_cmds::ImplantCatCommand {}));
 
         registry
     }
 
     pub fn register(&mut self, command: Box<dyn RbCommand>) {
-        match command.command_type() {
-            CommandType::Server => {
-                self.server_commands
-                    .insert(command.name().to_string(), command);
-            }
-            CommandType::Implant => {
-                self.implant_commands
-                    .insert(command.name().to_string(), command);
-            }
-        }
+        self.server_commands
+            .insert(command.name().to_string(), command);
     }
 
     pub fn get_server_command(&self, name: &str) -> Option<&Box<dyn RbCommand>> {
         self.server_commands.get(name)
     }
 
-    pub fn get_implant_command(&self, name: &str) -> Option<&Box<dyn RbCommand>> {
-        self.implant_commands.get(name)
-    }
-
     pub fn list_server_commands(&self) -> Vec<&str> {
         self.server_commands.keys().map(|k| k.as_str()).collect()
-    }
-
-    pub fn list_implant_commands(&self) -> Vec<&str> {
-        self.implant_commands.keys().map(|k| k.as_str()).collect()
     }
 
     // Execute a command with proper routing
@@ -204,6 +181,19 @@ impl CommandRegistry {
         }
 
         let command_name = command_line.split_whitespace().next().unwrap_or("");
+
+        // Only known implant commands become tasks.
+        if implant_cmds::find(command_name).is_none() {
+            let supported = implant_cmds::IMPLANT_COMMANDS
+                .iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(CommandError::InvalidArguments(format!(
+                "Unknown implant command '{}'. Supported commands: {}",
+                command_name, supported
+            )));
+        }
 
         let args = command_line
             .split_whitespace()

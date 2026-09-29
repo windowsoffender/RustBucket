@@ -99,9 +99,19 @@ crl_update_seconds = 5
 
 Sessions, tasks, results and listener definitions are saved to the SQLite database at `db_path`, so they survive a restart. HTTP listeners are automatically bound again on startup. Set `db_path = ""` to keep everything in memory.
 
+# Implant commands
+
+Once an implant has checked in, attach to it from the client with `sessions use <id>` and run one of:
+
+- `pwd` - print the implant's working directory
+- `ls [path]` - list a directory
+- `cat <file>` - print a file's contents
+- `systeminfo` - show system information
+
+Commands run natively on the implant and anything else is rejected. There is no shell.
+
 # TODO
 
-- Implement actual commands to do stuff instead of just powershell commands.
 - Nicer cli experience (tab completion, syntax highlighting, etc).
 - Operator profiles and a command to generate them.
 - Make server send the generated payload to the client (currently it just stays on the server).

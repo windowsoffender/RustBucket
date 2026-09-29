@@ -73,10 +73,12 @@ impl RbCommand for ServerHelpCommand {
                 return self.generate_command_help(command);
             }
 
-            // Try implant commands next
-            if let Some(command) = context.command_registry.get_implant_command(&command_name) {
-                // Generate help for this specific implant command
-                return self.generate_command_help(command);
+            // Implant commands live on the implant; the server knows their metadata.
+            if let Some(command) = crate::command::implant_cmds::find(&command_name) {
+                return Ok(CommandOutput::Text(format!(
+                    "{}\n\nUsage: {}",
+                    command.description, command.usage
+                )));
             }
 
             return Err(CommandError::TargetNotFound(format!(
@@ -100,11 +102,8 @@ impl RbCommand for ServerHelpCommand {
         result.push_str("\nImplant Commands (require active session):\n");
 
         // List implant commands
-        let implant_commands = context.command_registry.list_implant_commands();
-        for cmd_name in implant_commands {
-            if let Some(cmd) = context.command_registry.get_implant_command(cmd_name) {
-                result.push_str(&format!("  {:15} - {}\n", cmd_name, cmd.description()));
-            }
+        for command in crate::command::implant_cmds::IMPLANT_COMMANDS {
+            result.push_str(&format!("  {:15} - {}\n", command.name, command.description));
         }
 
         result

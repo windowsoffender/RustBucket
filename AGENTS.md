@@ -29,7 +29,9 @@ Implants only work after the operator starts an HTTP listener from the client: `
 
 ## Adding commands
 
-Server commands: implement `RbCommand` in `rb/src/command/server_cmds/`, re-export in that `mod.rs`, register in `CommandRegistry::new` (`rb/src/command/mod.rs`). Implant commands use the same path, but their registrations are commented out so they never run. Uncomment to wire them up.
+Server commands: implement `RbCommand` in `rb/src/command/server_cmds/`, re-export in that `mod.rs`, register in `CommandRegistry::new` (`rb/src/command/mod.rs`).
+
+Implant commands are different: they execute on the implant, not the server. Add the handler to `run_command` in `rb_implant/src/lib.rs`, and its metadata to `IMPLANT_COMMANDS` in `rb/src/command/implant_cmds.rs`. The server validates command names against that list and forwards the command line as a task; unknown commands are rejected before a task exists. There is no shell fallback.
 
 Routing: `CommandRegistry::execute` treats a request as an implant command when `session_id` is set, otherwise a server command.
 
