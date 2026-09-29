@@ -1,0 +1,18 @@
+# RustBucket server configuration.
+#
+# Values here override the built-in defaults. CLI flags override this file.
+# Run with `--config <file>` to use a different file.
+
+host = "0.0.0.0"
+port = 6666
+verbose = false
+
+[mtls]
+# Require a client certificate on the operator channel.
+# The server generates a throwaway test PKI into the paths below at startup.
+enabled = false
+ca_path = "certs/ca-cert.pem"
+cert_path = "certs/client-cert.pem"
+key_path = "certs/client-key.pem"
+crl_path = "certs/crl.der"
+crl_update_seconds = 5

@@ -20,5 +20,6 @@ rustls = { version = "0.23.23", features = ["logging"] }
 rustls-pemfile = "2.1.1"
 rcgen = "0.13.2"
 tokio-rustls = "0.26.2"
+toml = "0.8"
 env_logger = "0.11.7"
 dashmap = "6.1.0"

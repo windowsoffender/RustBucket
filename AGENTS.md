@@ -20,7 +20,7 @@ Two separate channels, don't mix them:
 - One crate: `cargo build -p rb_server --release` (README's `--lib <name>` form is invalid cargo)
 - Check: `cargo check --workspace`
 - Test: `cargo test --workspace`. Tests live in `rb/src/session.rs` and `rb_implant/src/lib.rs`. Single test: `cargo test -p rb test_session_creation`
-- Run: `cargo run -p rb_server` (binds `0.0.0.0:6666`; `--mtls`, `--host`, `--port`, `--ca-path/--cert-path/--key-path/--crl-path` flags), `cargo run -p rb_client -- --host localhost --port 6666`, `cargo run -p rb_implant -- --host <ip> --port 8080`
+- Run: `cargo run -p rb_server` (reads `rb_server.toml` from CWD, else defaults; binds `0.0.0.0:6666`; `--config`, `--mtls`, `--host`, `--port`, `--ca-path/--cert-path/--key-path/--crl-path` flags override), `cargo run -p rb_client -- --host localhost --port 6666`, `cargo run -p rb_implant -- --host <ip> --port 8080`
 - No CI, no rustfmt/clippy config. `cargo check` + `cargo test` is the whole verification story.
 
 Payload cross-compile needs `mingw-w64` and `rustup target add x86_64-pc-windows-gnu`.

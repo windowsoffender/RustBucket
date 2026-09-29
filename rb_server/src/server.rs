@@ -157,8 +157,8 @@ impl RbServer {
         // Write the certificates and keys to disk
         test_pki.write_to_disk(
             &self.config.mtls.ca_path,
-            &self.config.mtls.client_cert_path,
-            &self.config.mtls.client_key_path,
+            &self.config.mtls.cert_path,
+            &self.config.mtls.key_path,
             &self.config.mtls.crl_path,
             self.config.mtls.crl_update_seconds,
         );

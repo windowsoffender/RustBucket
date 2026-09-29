@@ -54,16 +54,10 @@ cargo build --release
 This builds all the binaries in the `target/release` folder.
 
 
-To build a specific crate, you can use the following command for crates with the `main.rs` entry point:
+To build a specific crate, use its package name:
 
 ```bash
-cargo build --bin <crate_name> --release
-```
-
-Or for crates with a `lib.rs` entry point:
-
-```bash
-cargo build --lib <crate_name> --release
+cargo build -p <crate_name> --release
 ```
 
 # Usage
@@ -74,7 +68,7 @@ cargo build --lib <crate_name> --release
 ./rb_server
 ```
 
-Runs the server on default port 6666. This can be customized later when we add config files.
+Runs the server on `0.0.0.0:6666` by default. Settings are read from `rb_server.toml` in the current directory (if present); CLI flags override it. See [Configuration](#configuration).
 
 2. Run the client
 
@@ -84,6 +78,23 @@ Runs the server on default port 6666. This can be customized later when we add c
 
 This will connect to the default server on localhost:6666. You can change the connection details with command line flags. Run `./rb_client --help` for more details.
 
+# Configuration
+
+The server reads `rb_server.toml` from the current directory by default. Pass `--config <file>` to use a different one. Any CLI flag (`--host`, `--port`, `--mtls`, `--ca-path`, `--cert-path`, `--key-path`, `--crl-path`) overrides the file. A missing default file is fine, the built-in defaults are used.
+
+```toml
+host = "0.0.0.0"
+port = 6666
+verbose = false
+
+[mtls]
+enabled = false
+ca_path = "certs/ca-cert.pem"
+cert_path = "certs/client-cert.pem"
+key_path = "certs/client-key.pem"
+crl_path = "certs/crl.der"
+crl_update_seconds = 5
+```
 
 # TODO
 
@@ -91,6 +102,5 @@ This will connect to the default server on localhost:6666. You can change the co
 - Implement actual commands to do stuff instead of just powershell commands.
 - Nicer cli experience (tab completion, syntax highlighting, etc).
 - A DB to save server state.
-- Config file for server.
 - Operator profiles and a command to generate them.
 - Make server send the generated payload to the client (currently it just stays on the server).

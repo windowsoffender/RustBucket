@@ -6,39 +6,44 @@ mod server;
 // mod server;
 
 use clap::Parser;
+use std::path::PathBuf;
 use tokio::signal;
 
 /// Operator server for RustBucket.
 #[derive(Parser, Debug)]
 #[command(name = "RustBucket Server", version, about)]
 struct Args {
+    /// Path to the config file (defaults to ./rb_server.toml if present)
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
     /// Host to bind the operator server to
-    #[arg(long, default_value = "0.0.0.0")]
-    host: String,
+    #[arg(long)]
+    host: Option<String>,
 
     /// Port to bind the operator server to
-    #[arg(short, long, default_value_t = 6666)]
-    port: u16,
+    #[arg(short, long)]
+    port: Option<u16>,
 
     /// Enable mutual TLS on the operator channel
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
     mtls: bool,
 
     /// Path to the CA certificate (written at startup)
-    #[arg(long, default_value = "certs/ca-cert.pem")]
-    ca_path: String,
+    #[arg(long)]
+    ca_path: Option<String>,
 
     /// Path to the client certificate (written at startup)
-    #[arg(long, default_value = "certs/client-cert.pem")]
-    cert_path: String,
+    #[arg(long)]
+    cert_path: Option<String>,
 
     /// Path to the client key (written at startup)
-    #[arg(long, default_value = "certs/client-key.pem")]
-    key_path: String,
+    #[arg(long)]
+    key_path: Option<String>,
 
     /// Path to the CRL (written at startup)
-    #[arg(long, default_value = "certs/crl.der")]
-    crl_path: String,
+    #[arg(long)]
+    crl_path: Option<String>,
 }
 
 #[tokio::main]
@@ -52,21 +57,46 @@ async fn main() {
         .init()
         .unwrap();
 
-    // Create mTLS configuration
-    let mtls_config = config::MtlsConfig::new(
-        args.mtls,
-        args.ca_path,
-        args.cert_path,
-        args.key_path,
-        args.crl_path,
-        5, // CRL update interval in seconds
+    // Load the config file (if any), then apply CLI overrides.
+    let mut conf = match config::RbServerConfig::load(args.config.as_deref()) {
+        Ok(conf) => conf,
+        Err(e) => {
+            eprintln!("{}", e);
+            return;
+        }
+    };
+    if let Some(host) = args.host {
+        conf.host = host;
+    }
+    if let Some(port) = args.port {
+        conf.port = port;
+    }
+    if args.mtls {
+        conf.mtls.enabled = true;
+    }
+    if let Some(path) = args.ca_path {
+        conf.mtls.ca_path = path;
+    }
+    if let Some(path) = args.cert_path {
+        conf.mtls.cert_path = path;
+    }
+    if let Some(path) = args.key_path {
+        conf.mtls.key_path = path;
+    }
+    if let Some(path) = args.crl_path {
+        conf.mtls.crl_path = path;
+    }
+
+    log::info!(
+        "Starting server on {}:{} (mTLS: {})",
+        conf.host,
+        conf.port,
+        if conf.mtls.enabled { "on" } else { "off" }
     );
 
-    // Create server with mTLS configuration
-    let conf = config::RbServerConfig::with_mtls(args.host, args.port, false, mtls_config);
+    // Create the C2 server and start it
     let c2 = server::RbServer::new(conf);
 
-    // Start C2 server
     match c2.start().await {
         Ok(_) => {
             log::info!("C2 server started successfully");
