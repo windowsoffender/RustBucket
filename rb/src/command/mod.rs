@@ -55,6 +55,7 @@ pub struct CommandContext {
     // pub listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<dyn Listener>>>>>>, // Should switch to a generic listener type like this later
     pub listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<HttpListener>>>>>>, // For now, only
                                                                              // HTTP listeners
+    pub listener_tls: Arc<rustls::ServerConfig>,
 }
 
 // Command Registry for server-side commands. Implant command metadata lives in

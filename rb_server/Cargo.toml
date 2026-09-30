@@ -16,10 +16,10 @@ rb = { path = "../rb" }
 tokio-util = "0.7.14"
 futures = "0.3.31"
 clap = { version = "4.5.36", features = ["derive"] }
-rustls = { version = "0.23.23", features = ["logging"] }
+rustls = { version = "0.23.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.1.1"
 rcgen = "0.13.2"
-tokio-rustls = "0.26.2"
+tokio-rustls = { version = "0.26.2", default-features = false, features = ["ring", "logging", "tls12"] }
 toml = "0.8"
 env_logger = "0.11.7"
 dashmap = "6.1.0"

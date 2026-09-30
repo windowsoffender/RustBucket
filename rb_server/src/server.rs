@@ -30,6 +30,7 @@ pub struct RbServer {
     listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<HttpListener>>>>>>,
     store: Arc<dyn Store>,
     pki: Arc<TestPki>,
+    listener_tls: Arc<rustls::ServerConfig>,
     running: Arc<AtomicBool>,
     server_task: Mutex<Option<JoinHandle<()>>>,
     command_registry: Arc<CommandRegistry>,
@@ -45,6 +46,7 @@ impl RbServer {
             &config.implant_tls.ca_path,
             &config.implant_tls.ca_key_path,
         ));
+        let listener_tls = pki.listener_server_config();
 
         RbServer {
             config,
@@ -54,6 +56,7 @@ impl RbServer {
             listeners: Arc::new(Mutex::new(HashMap::new())),
             store,
             pki,
+            listener_tls,
             running: Arc::new(AtomicBool::new(false)),
             server_task: Mutex::new(None),
             command_registry: Arc::new(CommandRegistry::new()),
@@ -77,6 +80,13 @@ impl RbServer {
         } else {
             self.start_plain_server(&addr).await?;
         }
+
+        // The implant channel is always TLS; make its material available for standalone implants.
+        self.pki.write_implant_artifacts(
+            &self.config.implant_tls.ca_path,
+            &self.config.implant_tls.cert_path,
+            &self.config.implant_tls.key_path,
+        );
 
         // Bring persisted listeners back up so implants can reconnect.
         self.restore_listeners();
@@ -109,8 +119,13 @@ impl RbServer {
                 }
             };
 
-            let mut listener =
-                HttpListener::with_id(record.id, &record.name, addr, self.store.clone());
+            let mut listener = HttpListener::with_id(
+                record.id,
+                &record.name,
+                addr,
+                self.store.clone(),
+                self.listener_tls.clone(),
+            );
 
             match listener.start() {
                 Ok(_) => {
@@ -140,6 +155,7 @@ impl RbServer {
         let command_registry = self.command_registry.clone();
         let listeners = self.listeners.clone();
         let client_handlers = self.client_handlers.clone();
+        let listener_tls = self.listener_tls.clone();
 
         let handle = tokio::spawn(async move {
             while running.load(Ordering::SeqCst) {
@@ -164,6 +180,7 @@ impl RbServer {
                         let running_clone = running.clone();
                         let command_registry_clone = command_registry.clone();
                         let listeners_clone = listeners.clone();
+                        let listener_tls_clone = listener_tls.clone();
 
                         // Spawn and store the client handler
                         let handler = tokio::spawn(async move {
@@ -178,6 +195,7 @@ impl RbServer {
                                 listeners_clone,
                                 running_clone,
                                 command_registry_clone,
+                                listener_tls_clone,
                             )
                             .await
                             {
@@ -243,6 +261,7 @@ impl RbServer {
         let command_registry = self.command_registry.clone();
         let crl_path = self.config.mtls.crl_path.clone();
         let listeners = self.listeners.clone();
+        let listener_tls = self.listener_tls.clone();
 
         let handle = tokio::spawn(async move {
             while running.load(Ordering::SeqCst) {
@@ -261,6 +280,7 @@ impl RbServer {
                         let running_clone = running.clone();
                         let command_registry_clone = command_registry.clone();
                         let listeners_clone = listeners.clone();
+                        let listener_tls_clone = listener_tls.clone();
 
                         tokio::spawn(async move {
                             // Build a fresh server config (reads the latest CRL from disk) and
@@ -294,6 +314,7 @@ impl RbServer {
                                 listeners_clone,
                                 running_clone,
                                 command_registry_clone,
+                                listener_tls_clone,
                             )
                             .await
                             {
@@ -326,6 +347,7 @@ impl RbServer {
         listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<HttpListener>>>>>>,
         running: Arc<AtomicBool>,
         command_registry: Arc<CommandRegistry>,
+        listener_tls: Arc<rustls::ServerConfig>,
     ) -> io::Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -356,6 +378,7 @@ impl RbServer {
                         server_port,
                         command_registry: command_registry.clone(),
                         listeners: listeners.clone(),
+                        listener_tls: listener_tls.clone(),
                     };
 
                     let command_request: CommandRequest = match serde_json::from_str(msg.as_str()) {
@@ -499,4 +522,89 @@ impl RbServer {
     // pub fn is_running(&self) -> bool {
     //     self.running.load(Ordering::SeqCst)
     // }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rb::message::ImplantCheckin;
+    use rb::store::memory::MemoryStore;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::TlsConnector;
+
+    fn free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn listener_serves_mtls() {
+        let dir = std::env::temp_dir().join(format!("rb_listener_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pki = Arc::new(TestPki::load_or_create(
+            dir.join("ca-cert.pem").to_str().unwrap(),
+            dir.join("ca-key.pem").to_str().unwrap(),
+            dir.join("implant-ca-cert.pem").to_str().unwrap(),
+            dir.join("implant-ca-key.pem").to_str().unwrap(),
+        ));
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+
+        let port = free_port();
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let mut listener =
+            HttpListener::new("test", addr, store.clone(), pki.listener_server_config());
+        listener.start().unwrap();
+
+        // Build a rustls 0.23 client from the implant credentials.
+        let creds = pki.implant_credentials();
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut creds.ca_cert_pem.as_bytes()) {
+            roots.add(cert.unwrap()).unwrap();
+        }
+        let certs = rustls_pemfile::certs(&mut creds.client_cert_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = rustls_pemfile::private_key(&mut creds.client_key_pem.as_bytes())
+            .unwrap()
+            .unwrap();
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(certs, key)
+            .unwrap();
+
+        let connector = TlsConnector::from(Arc::new(config));
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let server_name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap();
+        let mut tls = connector.connect(server_name, tcp).await.unwrap();
+
+        let body = serde_json::to_string(&ImplantCheckin {
+            id: None,
+            hostname: "test-host".to_string(),
+            ip_address: "127.0.0.1".to_string(),
+            os_info: "test".to_string(),
+            username: "tester".to_string(),
+            process_id: 1,
+        })
+        .unwrap();
+        let request = format!(
+            "POST /checkin HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        tls.write_all(request.as_bytes()).await.unwrap();
+        tls.flush().await.unwrap();
+
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "unexpected response: {}",
+            response
+        );
+        assert_eq!(store.list_implants().len(), 1);
+
+        listener.stop().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

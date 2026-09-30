@@ -196,6 +196,7 @@ impl RbCommand for ServerListenersCommand {
                                     format!("HTTP_{}:{}", bind_address, port).as_str(),
                                     socket_addr,
                                     context.store.clone(),
+                                    context.listener_tls.clone(),
                                 );
 
                                 let listener_id = new_listener.id();

@@ -16,23 +16,36 @@ pub struct HttpListener {
     id: Uuid,
     addr: SocketAddr,
     store: Arc<dyn Store>,
+    tls: Arc<rustls::ServerConfig>,
     running: Arc<AtomicBool>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl HttpListener {
-    pub fn new(name: &str, addr: SocketAddr, store: Arc<dyn Store>) -> Self {
-        Self::with_id(Uuid::new_v4(), name, addr, store)
+    pub fn new(
+        name: &str,
+        addr: SocketAddr,
+        store: Arc<dyn Store>,
+        tls: Arc<rustls::ServerConfig>,
+    ) -> Self {
+        Self::with_id(Uuid::new_v4(), name, addr, store, tls)
     }
 
     /// Restore a listener with a known ID. Used when rebuilding persisted listeners on startup.
-    pub fn with_id(id: Uuid, name: &str, addr: SocketAddr, store: Arc<dyn Store>) -> Self {
+    pub fn with_id(
+        id: Uuid,
+        name: &str,
+        addr: SocketAddr,
+        store: Arc<dyn Store>,
+        tls: Arc<rustls::ServerConfig>,
+    ) -> Self {
         HttpListener {
             name: name.to_string(),
             id,
             addr,
             store,
+            tls,
             running: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
             handle: None,
@@ -60,6 +73,7 @@ impl HttpListener {
         let server_addr = self.addr;
         let listener_name = self.name.clone();
         let listener_id = self.id;
+        let tls = self.tls.clone();
 
         let listener_data = web::Data::new(ListenerData {
             name: listener_name.clone(),
@@ -93,7 +107,7 @@ impl HttpListener {
                     .route("/results", web::post().to(upload_results))
                     .route("/implants", web::get().to(list_implants))
             })
-            .listen(std_listener)
+            .listen_rustls_0_23(std_listener, (*tls).clone())
             {
                 Ok(server) => server,
                 Err(e) => {
