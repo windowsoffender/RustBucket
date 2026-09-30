@@ -127,6 +127,12 @@ Connect with an issued profile (CLI flags override it):
 ./rb_client --profile operators/<name>.toml
 ```
 
-# TODO
+# Payloads
 
-- Make server send the generated payload to the client (currently it just stays on the server).
+From the client, build a Windows payload and have the server send it back:
+
+```
+payload new --lhost <listener-ip> --lport <listener-port>
+```
+
+The server cross-compiles the implant and the client saves the executable to its working directory (for example `rb_payload.exe`). This needs `mingw-w64` and the `x86_64-pc-windows-gnu` target, and the server must run from the repo root so it can find `rb_implant` when building.

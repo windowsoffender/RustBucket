@@ -133,6 +133,16 @@ pub fn display_command_output(output: &CommandOutput) {
                 "Command executed successfully with no output.".bright_green()
             );
         }
+        CommandOutput::File { name, data } => {
+            let path = std::path::PathBuf::from(name);
+            match std::fs::write(&path, data) {
+                Ok(_) => {
+                    let absolute = std::fs::canonicalize(&path).unwrap_or(path);
+                    println!("{} {}", "Saved".bright_green().bold(), absolute.display());
+                }
+                Err(e) => eprintln!("{}: {}", "Failed to save file".bright_red(), e),
+            }
+        }
     }
 }
 

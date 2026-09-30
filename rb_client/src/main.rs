@@ -491,11 +491,10 @@ fn main() -> io::Result<()> {
                     }
                 }
 
-                // Read the response from the server
+                // Read one response line (the server terminates each message with '\n').
                 let mut response_data = Vec::new();
-                let mut buffer = [0; 1024];
+                let mut buffer = [0; 8192];
 
-                // Read in a loop until we have a complete response
                 loop {
                     let n = match &mut connection {
                         ConnectionType::Plain(stream) => match stream.read(&mut buffer) {
@@ -527,34 +526,36 @@ fn main() -> io::Result<()> {
                     };
 
                     response_data.extend_from_slice(&buffer[..n]);
-
-                    // Try to parse what we have so far to see if it's complete
-                    if let Ok(response) =
-                        serde_json::from_slice::<utils::ServerResponse>(&response_data)
-                    {
-                        // We have a complete response
-                        match response {
-                            utils::ServerResponse::Success(output) => {
-                                utils::display_command_output(&output);
-                            }
-                            utils::ServerResponse::Error(error) => {
-                                utils::display_command_error(&error);
-
-                                // If we got a session error and we're in session mode, exit it
-                                if let CommandError::SessionError(_)
-                                | CommandError::NoActiveSession(_) = error
-                                {
-                                    if active_session.is_some() {
-                                        active_session = None;
-                                        prompt.clear_session();
-                                        println!("{}", "Session interaction ended".yellow());
-                                    }
-                                }
-                            }
-                        }
+                    if response_data.contains(&b'\n') {
                         break;
                     }
-                    // If we couldn't parse yet, continue reading
+                }
+
+                let line = match response_data.iter().position(|b| *b == b'\n') {
+                    Some(pos) => &response_data[..pos],
+                    None => &response_data[..],
+                };
+
+                match serde_json::from_slice::<utils::ServerResponse>(line) {
+                    Ok(utils::ServerResponse::Success(output)) => {
+                        utils::display_command_output(&output);
+                    }
+                    Ok(utils::ServerResponse::Error(error)) => {
+                        utils::display_command_error(&error);
+
+                        // If we got a session error and we're in session mode, exit it
+                        if let CommandError::SessionError(_) | CommandError::NoActiveSession(_) = error
+                        {
+                            if active_session.is_some() {
+                                active_session = None;
+                                prompt.clear_session();
+                                println!("{}", "Session interaction ended".yellow());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{}: {}", "Failed to parse server response".bright_red(), e);
+                    }
                 }
             }
             Signal::CtrlD => {

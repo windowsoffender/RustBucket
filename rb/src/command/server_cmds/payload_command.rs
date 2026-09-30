@@ -99,10 +99,13 @@ impl RbCommand for PayloadCommand {
 
             // Generate the payload
             match self.generate_payload(config) {
-                Ok(path) => {
-                    let output = format!("Payload generated successfully: {}", path.display());
-                    Ok(CommandOutput::Text(output))
-                },
+                Ok((path, data)) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "rb_payload.exe".to_string());
+                    Ok(CommandOutput::File { name, data })
+                }
                 Err(e) => {
                     Err(CommandError::ExecutionFailed(format!("Failed to generate payload: {}", e)))
                 }
@@ -116,7 +119,7 @@ impl RbCommand for PayloadCommand {
 }
 
 impl PayloadCommand {
-    fn generate_payload(&self, config: PayloadConfig) -> Result<PathBuf, Box<dyn Error>> {
+    fn generate_payload(&self, config: PayloadConfig) -> Result<(PathBuf, Vec<u8>), Box<dyn Error>> {
         use std::fs;
         use std::process::Command;
 
@@ -180,7 +183,10 @@ async fn main() {{
         if !exe_path.exists() {
             return Err("Build completed but executable not found at expected path".into());
         }
-        
-        Ok(exe_path)
+
+        // 5) Read the executable so it can be sent to the client
+        let data = fs::read(&exe_path)?;
+
+        Ok((exe_path, data))
     }
 }

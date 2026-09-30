@@ -13,5 +13,6 @@ uuid = { version = "1.16.0", features = ["v4", "serde"]}
 log = "0.4.26"
 clap = "4.5.36"
 futures = "0.3.31"
+base64 = "0.23.1"
 # rb_client = { path = "../rb_client" }
 # rb_server = { path = "../rb_server" }
