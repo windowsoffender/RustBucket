@@ -102,6 +102,22 @@ Sessions, tasks, results and listener definitions are saved to the SQLite databa
 
 The CA key at `ca_key_path` is generated once and reused, so certificates issued to operators stay valid across restarts.
 
+# Listeners
+
+Start an HTTPS listener from the client before running an implant:
+
+```
+listeners start http -p 8080
+```
+
+The listener serves the implant endpoints over HTTPS with mTLS, so the implant must present a client cert signed by the implant CA. The server writes that CA and an implant cert/key pair to `certs/` (`implant-ca-cert.pem`, `implant-cert.pem`, `implant-key.pem`).
+
+To run a standalone implant for testing, point it at those certs:
+
+```bash
+cargo run -p rb_implant -- --host <ip> --port 8080 --ca-path certs/implant-ca-cert.pem --cert-path certs/implant-cert.pem --key-path certs/implant-key.pem
+```
+
 # Implant commands
 
 Once an implant has checked in, attach to it from the client with `sessions use <id>` and run one of:
@@ -147,3 +163,5 @@ payload new --lhost <listener-ip> --lport <listener-port>
 ```
 
 The server cross-compiles the implant and the client saves the executable to its working directory (for example `rb_payload.exe`). This needs `mingw-w64` and the `x86_64-pc-windows-gnu` target, and the server must run from the repo root so it can find `rb_implant` when building.
+
+The generated payload embeds the implant CA and client cert/key automatically, so it can talk to an HTTPS listener without any cert files on disk.
