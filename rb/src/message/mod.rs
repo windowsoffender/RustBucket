@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 use uuid::Uuid;
@@ -6,6 +7,9 @@ use uuid::Uuid;
 pub struct CommandRequest {
     pub command_line: String,
     pub session_id: Option<usize>, // Optional session ID for targeting specific sessions
+    /// Optional binary payload (base64 on the wire), used by `upload`.
+    #[serde(default, with = "base64_bytes_opt")]
+    pub data: Option<Vec<u8>>,
 }
 
 // #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +62,46 @@ mod base64_bytes {
             .decode(encoded)
             .map_err(serde::de::Error::custom)
     }
+}
+
+/// Serde helper that encodes optional bytes as a base64 string (or null).
+pub(crate) mod base64_bytes_opt {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        data: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match data {
+            Some(bytes) => serializer
+                .serialize_some(&base64::engine::general_purpose::STANDARD.encode(bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        match Option::<String>::deserialize(deserializer)? {
+            Some(encoded) => base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Base64-encode optional bytes, for storage.
+pub fn encode_optional_data(data: &Option<Vec<u8>>) -> Option<String> {
+    data.as_ref()
+        .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Decode optional base64 bytes, for storage.
+pub fn decode_optional_data(encoded: Option<String>) -> Option<Vec<u8>> {
+    encoded.and_then(|text| base64::engine::general_purpose::STANDARD.decode(text).ok())
 }
 
 // Command error types

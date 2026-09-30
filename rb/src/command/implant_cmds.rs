@@ -38,6 +38,11 @@ pub const IMPLANT_COMMANDS: &[ImplantCommandInfo] = &[
         description: "Send a file back to the operator",
     },
     ImplantCommandInfo {
+        name: "upload",
+        usage: "upload <local-file> [remote-path]",
+        description: "Send a local file to the implant",
+    },
+    ImplantCommandInfo {
         name: "mkdir",
         usage: "mkdir <dir>",
         description: "Create a directory",
@@ -89,8 +94,8 @@ pub const IMPLANT_COMMANDS: &[ImplantCommandInfo] = &[
     },
     ImplantCommandInfo {
         name: "sleep",
-        usage: "sleep <seconds>",
-        description: "Sleep on the implant",
+        usage: "sleep <seconds> [jitter-percent]",
+        description: "Set the beacon interval and optional jitter",
     },
     ImplantCommandInfo {
         name: "netstat",

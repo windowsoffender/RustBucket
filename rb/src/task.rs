@@ -43,6 +43,10 @@ pub struct Task {
     /// Arguments for the command
     pub args: Vec<String>,
 
+    /// Optional binary payload (base64 on the wire), used by `upload`
+    #[serde(default, with = "crate::message::base64_bytes_opt")]
+    pub data: Option<Vec<u8>>,
+
     /// When the task was created
     pub created_at: SystemTime,
 
@@ -184,5 +188,48 @@ impl From<TaskResult> for TaskResultResponse {
             completed_at,
             // execution_time_ms: result.execution_time_ms,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_data_is_base64_on_the_wire() {
+        let task = Task {
+            id: Uuid::new_v4(),
+            implant_id: Uuid::new_v4(),
+            session_id: 1,
+            command: "upload".to_string(),
+            args: vec!["remote.bin".to_string()],
+            data: Some(vec![0, 1, 2, 253, 254, 255]),
+            created_at: SystemTime::now(),
+            status: TaskStatus::Pending,
+        };
+
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(json.contains("\"data\":\"AAEC/f7/\""), "{}", json);
+
+        let decoded: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.data, Some(vec![0, 1, 2, 253, 254, 255]));
+    }
+
+    #[test]
+    fn task_without_data_round_trips() {
+        let task = Task {
+            id: Uuid::new_v4(),
+            implant_id: Uuid::new_v4(),
+            session_id: 1,
+            command: "pwd".to_string(),
+            args: vec![],
+            data: None,
+            created_at: SystemTime::now(),
+            status: TaskStatus::Pending,
+        };
+
+        let json = serde_json::to_string(&task).unwrap();
+        let decoded: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.data, None);
     }
 }

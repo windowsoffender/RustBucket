@@ -105,6 +105,7 @@ pub trait Store: Send + Sync {
         session_id: usize,
         command: String,
         args: Vec<String>,
+        data: Option<Vec<u8>>,
     ) -> Result<Uuid, StoreError>;
 
     /// Look up a task by ID.

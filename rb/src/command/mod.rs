@@ -98,8 +98,14 @@ impl CommandRegistry {
         context: &mut CommandContext,
         command_request: CommandRequest,
     ) -> CommandResult {
+        let CommandRequest {
+            command_line,
+            session_id,
+            data,
+        } = command_request;
+
         // Parse the command
-        let parts: Vec<&str> = command_request.command_line.split_whitespace().collect();
+        let parts: Vec<&str> = command_line.split_whitespace().collect();
         if parts.is_empty() {
             return Err(CommandError::InvalidArguments(
                 "No command specified".into(),
@@ -109,9 +115,8 @@ impl CommandRegistry {
         let command_name = parts[0];
 
         // Check if we have a session_id to determine command type
-        if let Some(session_id) = command_request.session_id {
+        if let Some(session_id) = session_id {
             // Execute implant command on a specific session
-            // if let Some(command) = self.get_implant_command(command_name) {
             // Verify the session exists
             let session_exists = context.store.get_session(&session_id).is_some();
 
@@ -123,23 +128,13 @@ impl CommandRegistry {
             }
 
             return self
-                .execute_implant_command(
-                    context,
-                    command_request.command_line.as_str(),
-                    session_id,
-                )
+                .execute_implant_command(context, &command_line, session_id, data)
                 .await;
-            // } else {
-            //     return Err(CommandError::TargetNotFound(format!(
-            //         "Implant command '{}' not found",
-            //         command_name
-            //     )));
-            // }
         } else {
             // No session_id, so it's a server command
             if let Some(command) = self.get_server_command(command_name) {
                 return self
-                    .execute_server_command(command, context, command_request.command_line.as_str())
+                    .execute_server_command(command, context, &command_line)
                     .await;
             } else {
                 return Err(CommandError::TargetNotFound(format!(
@@ -176,6 +171,7 @@ impl CommandRegistry {
         context: &mut CommandContext,
         command_line: &str,
         session_id: usize,
+        data: Option<Vec<u8>>,
     ) -> CommandResult {
         // Make sure the session exists before creating a task for it.
         if context.store.get_session(&session_id).is_none() {
@@ -208,7 +204,7 @@ impl CommandRegistry {
 
         log::debug!("Command name: {}, args: {:?}", command_name, args);
 
-        let task_id = match context.store.create_task(session_id, command_name.to_string(), args) {
+        let task_id = match context.store.create_task(session_id, command_name.to_string(), args, data) {
             Ok(id) => id,
             Err(err) => {
                 return Err(CommandError::Internal(format!(

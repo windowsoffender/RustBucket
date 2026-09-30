@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     implant_id  TEXT NOT NULL,
     command     TEXT NOT NULL,
     args        TEXT NOT NULL,
+    data        TEXT,
     status      TEXT NOT NULL,
     created_at  INTEGER NOT NULL
 );
@@ -158,6 +159,9 @@ impl SqliteStore {
     fn init(conn: Connection) -> Result<Self, StoreError> {
         conn.execute_batch(SCHEMA).map_err(db_error)?;
 
+        // Migrate databases created before the `data` column existed.
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN data TEXT", []);
+
         // Implants only reconnect when they poll, so restored sessions start disconnected until
         // their implant checks back in.
         conn.execute("UPDATE sessions SET status = 'disconnected'", [])
@@ -209,8 +213,9 @@ fn row_to_task(row: &Row<'_>) -> rusqlite::Result<Task> {
         implant_id: parse_uuid(&row.get::<_, String>(2)?),
         command: row.get(3)?,
         args: serde_json::from_str(&args).unwrap_or_default(),
-        status: task_status_from_str(&row.get::<_, String>(5)?),
-        created_at: unix_to_system_time(row.get(6)?),
+        data: rb::message::decode_optional_data(row.get(5)?),
+        status: task_status_from_str(&row.get::<_, String>(6)?),
+        created_at: unix_to_system_time(row.get(7)?),
     })
 }
 
@@ -420,6 +425,7 @@ impl Store for SqliteStore {
         session_id: usize,
         command: String,
         args: Vec<String>,
+        data: Option<Vec<u8>>,
     ) -> Result<Uuid, StoreError> {
         let conn = self.conn();
         let implant_id: String = conn
@@ -435,14 +441,15 @@ impl Store for SqliteStore {
         let task_id = Uuid::new_v4();
         let args = serde_json::to_string(&args).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
-            "INSERT INTO tasks (id, session_id, implant_id, command, args, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO tasks (id, session_id, implant_id, command, args, data, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 task_id.to_string(),
                 session_id as i64,
                 implant_id,
                 command,
                 args,
+                rb::message::encode_optional_data(&data),
                 task_status_to_str(&TaskStatus::Pending),
                 now_unix()
             ],
@@ -454,7 +461,7 @@ impl Store for SqliteStore {
     fn get_task(&self, id: &Uuid) -> Option<Task> {
         self.conn()
             .query_row(
-                "SELECT id, session_id, implant_id, command, args, status, created_at
+                "SELECT id, session_id, implant_id, command, args, data, status, created_at
                  FROM tasks WHERE id = ?1",
                 params![id.to_string()],
                 row_to_task,
@@ -467,7 +474,7 @@ impl Store for SqliteStore {
     fn list_pending_tasks(&self, session_id: usize) -> Vec<Task> {
         let conn = self.conn();
         let mut stmt = match conn.prepare(
-            "SELECT id, session_id, implant_id, command, args, status, created_at
+            "SELECT id, session_id, implant_id, command, args, data, status, created_at
              FROM tasks WHERE session_id = ?1 AND status = 'pending'",
         ) {
             Ok(stmt) => stmt,
@@ -685,7 +692,7 @@ mod tests {
             .unwrap();
 
         let task_id = store
-            .create_task(session_id, "whoami".to_string(), vec!["a".to_string()])
+            .create_task(session_id, "whoami".to_string(), vec!["a".to_string()], None)
             .unwrap();
         assert_eq!(store.list_pending_tasks(session_id).len(), 1);
 

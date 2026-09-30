@@ -109,10 +109,12 @@ Once an implant has checked in, attach to it from the client with `sessions use 
 File management:
 - `pwd`, `cd <path>` - working directory
 - `ls [path]`, `cat <file>`, `download <file>` (sends the file back to the operator)
+- `upload <local-file> [remote-path]` (sends a local file to the implant)
 - `mkdir <dir>`, `rm [-r] <path>`, `mv <src> <dst>`, `cp [-r] <src> <dst>`, `touch <file>`
 
 System:
-- `systeminfo`, `whoami`, `env`, `ps`, `kill <pid>`, `sleep <seconds>`
+- `systeminfo`, `whoami`, `env`, `ps`, `kill <pid>`
+- `sleep <seconds> [jitter-percent]` - set the beacon interval (and optional jitter)
 
 Network:
 - `netstat`, `ipconfig`
@@ -120,7 +122,7 @@ Network:
 Execution:
 - `shell <command>` - run a command through powershell on Windows, sh elsewhere
 
-Commands run natively on the implant. Unknown commands are rejected, and there is no implicit shell fallback; use `shell` to run arbitrary commands explicitly.
+Commands run natively on the implant. Unknown commands are rejected, and there is no implicit shell fallback; use `shell` to run arbitrary commands explicitly. The implant beacons every `--interval` seconds at startup and the interval can be changed at runtime with `sleep`.
 
 # Operator profiles
 

@@ -461,10 +461,46 @@ fn main() -> io::Result<()> {
                     }
                 }
 
+                // `upload` reads a local file and sends it along with the command.
+                let mut data: Option<Vec<u8>> = None;
+                let mut command_line = input.to_string();
+                if input == "upload" || input.starts_with("upload ") {
+                    if active_session.is_none() {
+                        eprintln!(
+                            "{}",
+                            "upload needs an active session (use 'sessions use <id>')".bright_red()
+                        );
+                        continue;
+                    }
+                    let parts: Vec<&str> = input.split_whitespace().collect();
+                    if parts.len() < 2 {
+                        eprintln!("{}", "Usage: upload <local-file> [remote-path]".bright_red());
+                        continue;
+                    }
+                    let local = parts[1];
+                    let remote = parts.get(2).map(|s| s.to_string()).unwrap_or_else(|| {
+                        std::path::Path::new(local)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "upload.bin".to_string())
+                    });
+                    match std::fs::read(local) {
+                        Ok(bytes) => {
+                            data = Some(bytes);
+                            command_line = format!("upload {}", remote);
+                        }
+                        Err(e) => {
+                            eprintln!("{} {}: {}", "Failed to read".bright_red(), local, e);
+                            continue;
+                        }
+                    }
+                }
+
                 // Create a CommandRequest
                 let request = CommandRequest {
-                    command_line: input.to_string(),
+                    command_line,
                     session_id: active_session,
+                    data,
                 };
 
                 // Serialize request to JSON

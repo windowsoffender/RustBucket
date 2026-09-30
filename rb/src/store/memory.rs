@@ -143,6 +143,7 @@ impl Store for MemoryStore {
         session_id: usize,
         command: String,
         args: Vec<String>,
+        data: Option<Vec<u8>>,
     ) -> Result<Uuid, StoreError> {
         let mut inner = self.lock();
         let implant_id = match inner.sessions.get(&session_id) {
@@ -158,6 +159,7 @@ impl Store for MemoryStore {
             session_id,
             command,
             args,
+            data,
             created_at: SystemTime::now(),
             status: TaskStatus::Pending,
         };
@@ -303,7 +305,7 @@ mod tests {
             .unwrap();
 
         let task_id = store
-            .create_task(session_id, "whoami".to_string(), vec![])
+            .create_task(session_id, "whoami".to_string(), vec![], None)
             .unwrap();
         assert_eq!(store.list_pending_tasks(session_id).len(), 1);
 
