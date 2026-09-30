@@ -6,7 +6,7 @@ Learning C2 framework in Rust, not production ready. `README.md` has install (mi
 
 - `rb` - shared lib. Wire types (`message`), `task`, `session` (a plain data struct), `store` (the `Store` trait + `MemoryStore`), command registry (`command`), implant-facing `listener::http_listener`. Everything else depends on it.
 - `rb_server` - operator server. Newline-delimited JSON over TCP, optional mTLS, embeds actix HTTP listeners for implants, `store::SqliteStore` for persistence.
-- `rb_client` - operator REPL (reedline). Talks to `rb_server`.
+- `rb_client` - operator REPL (reedline). Talks to `rb_server`. Completion/highlighting live in `rb_client/src/commands.rs`; history is `~/.rustbucket_history`.
 - `rb_implant` - Windows payload. HTTP check-in / poll / report loop.
 - `rb_payload_build/` - generated at runtime by the `payload` command, gitignored and excluded from the workspace. Never edit by hand.
 

@@ -31,3 +31,6 @@ Cargo.lock
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+
+# Client REPL history
+.rustbucket_history

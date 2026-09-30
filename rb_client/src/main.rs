@@ -1,7 +1,10 @@
 use clap::{Arg, Command};
 use colored::*;
-use reedline::{Prompt, PromptEditMode, PromptHistorySearch};
-use reedline::{Reedline, Signal};
+use nu_ansi_term::Style;
+use reedline::{
+    ColumnarMenu, DefaultHinter, FileBackedHistory, MenuBuilder, Prompt, PromptEditMode,
+    PromptHistorySearch, Reedline, ReedlineMenu, Signal,
+};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, Stream};
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -12,6 +15,7 @@ use std::sync::Arc;
 
 use rb::message::{CommandError, CommandOutput, CommandRequest};
 
+mod commands;
 mod utils;
 
 // Custom prompt implementation with the requested name
@@ -323,8 +327,23 @@ fn main() -> io::Result<()> {
         }
     };
 
-    // Create a new Reedline engine
-    let mut line_editor = Reedline::create();
+    // Create a new Reedline engine with history, completion and highlighting
+    let specs = commands::command_specs();
+    let history = match FileBackedHistory::with_file(1000, history_path()) {
+        Ok(history) => history,
+        Err(_) => FileBackedHistory::new(1000).expect("failed to create history"),
+    };
+    let mut line_editor = Reedline::create()
+        .with_history(Box::new(history))
+        .with_completer(Box::new(commands::RbCompleter::new(specs.clone())))
+        .with_highlighter(Box::new(commands::RbHighlighter::new(specs)))
+        .with_hinter(Box::new(
+            DefaultHinter::default().with_style(Style::new().fg(nu_ansi_term::Color::DarkGray)),
+        ))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(
+            ColumnarMenu::default().with_name("completion_menu"),
+        )))
+        .with_ansi_colors(true);
     let mut prompt = RustBucketPrompt::new();
 
     let banner = r"
@@ -376,12 +395,21 @@ fn main() -> io::Result<()> {
                         eprintln!("{}", "Invalid session ID".bright_red());
                         continue;
                     }
-                } else if input == "exit" && active_session.is_some() {
-                    // Exit session interaction mode
-                    active_session = None;
-                    prompt.clear_session();
-                    println!("{}", "Returned to main console".green());
-                    continue;
+                } else if input == "exit" || input == "quit" {
+                    if active_session.is_some() {
+                        // Leave session mode and return to the main console.
+                        active_session = None;
+                        prompt.clear_session();
+                        println!("{}", "Returned to main console".green());
+                        continue;
+                    } else {
+                        // Quit the client.
+                        println!("\n{}", "Disconnecting from server...".yellow());
+                        if let ConnectionType::Mtls(client, _) = &mut connection {
+                            let _ = client.send_close_notify();
+                        }
+                        break Ok(());
+                    }
                 }
 
                 // Create a CommandRequest
@@ -507,5 +535,13 @@ fn main() -> io::Result<()> {
                 }
             }
         }
+    }
+}
+
+/// Where the REPL keeps its command history.
+fn history_path() -> std::path::PathBuf {
+    match std::env::var("HOME") {
+        Ok(home) => std::path::PathBuf::from(home).join(".rustbucket_history"),
+        Err(_) => std::path::PathBuf::from(".rustbucket_history"),
     }
 }

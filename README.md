@@ -76,7 +76,7 @@ Runs the server on `0.0.0.0:6666` by default. Settings are read from `rb_server.
 ./rb_client
 ```
 
-This will connect to the default server on localhost:6666. You can change the connection details with command line flags. Run `./rb_client --help` for more details.
+This will connect to the default server on localhost:6666. You can change the connection details with command line flags. Run `./rb_client --help` for more details. The client has tab completion for commands and subcommands, syntax highlighting, and keeps history in `~/.rustbucket_history`.
 
 # Configuration
 
@@ -112,6 +112,5 @@ Commands run natively on the implant and anything else is rejected. There is no 
 
 # TODO
 
-- Nicer cli experience (tab completion, syntax highlighting, etc).
 - Operator profiles and a command to generate them.
 - Make server send the generated payload to the client (currently it just stays on the server).
