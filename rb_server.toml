@@ -19,3 +19,11 @@ cert_path = "certs/client-cert.pem"
 key_path = "certs/client-key.pem"
 crl_path = "certs/crl.der"
 crl_update_seconds = 5
+
+[implant_tls]
+# TLS material for the implant-facing HTTP listeners. Listeners always use TLS.
+# The CA key is generated once and reused, so generated payloads stay valid across restarts.
+ca_path = "certs/implant-ca-cert.pem"
+ca_key_path = "certs/implant-ca-key.pem"
+cert_path = "certs/implant-cert.pem"
+key_path = "certs/implant-key.pem"

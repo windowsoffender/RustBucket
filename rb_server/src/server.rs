@@ -42,6 +42,8 @@ impl RbServer {
         let pki = Arc::new(TestPki::load_or_create(
             &config.mtls.ca_path,
             &config.mtls.ca_key_path,
+            &config.implant_tls.ca_path,
+            &config.implant_tls.ca_key_path,
         ));
 
         RbServer {

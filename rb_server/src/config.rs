@@ -12,6 +12,7 @@ pub struct RbServerConfig {
     /// Path to the SQLite database. Empty string keeps state in memory only.
     pub db_path: String,
     pub mtls: MtlsConfig,
+    pub implant_tls: ImplantTlsConfig,
 }
 
 /// Mutual TLS settings for the operator channel.
@@ -27,6 +28,27 @@ pub struct MtlsConfig {
     pub crl_update_seconds: u64,
 }
 
+/// TLS material for the implant-facing HTTP listeners (always on).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ImplantTlsConfig {
+    pub ca_path: String,
+    pub ca_key_path: String,
+    pub cert_path: String,
+    pub key_path: String,
+}
+
+impl Default for ImplantTlsConfig {
+    fn default() -> Self {
+        ImplantTlsConfig {
+            ca_path: "certs/implant-ca-cert.pem".to_string(),
+            ca_key_path: "certs/implant-ca-key.pem".to_string(),
+            cert_path: "certs/implant-cert.pem".to_string(),
+            key_path: "certs/implant-key.pem".to_string(),
+        }
+    }
+}
+
 impl Default for RbServerConfig {
     fn default() -> Self {
         RbServerConfig {
@@ -35,6 +57,7 @@ impl Default for RbServerConfig {
             verbose: false,
             db_path: "rustbucket.sqlite".to_string(),
             mtls: MtlsConfig::default(),
+            implant_tls: ImplantTlsConfig::default(),
         }
     }
 }
