@@ -419,7 +419,6 @@ impl CrlUpdater {
 mod tests {
     use super::*;
     use rustls::pki_types::{CertificateDer, UnixTime};
-    use rustls::server::danger::ClientCertVerifier;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]

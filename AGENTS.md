@@ -4,7 +4,7 @@ Learning C2 framework in Rust, not production ready. `README.md` has install (mi
 
 ## Workspace layout
 
-- `rb` - shared lib. Wire types (`message`), `task`, `session` (a plain data struct), `store` (the `Store` trait + `MemoryStore`), command registry (`command`), implant-facing `listener::http_listener`. Everything else depends on it.
+- `rb` - shared lib. Wire types (`message`), `task`, `session` (a plain data struct), `store` (the `Store` trait + `MemoryStore`), command registry (`command`), implant-facing `listener::http_listener` (served over TLS with `rustls` 0.23). Everything else depends on it.
 - `rb_server` - operator server. Newline-delimited JSON over TCP, optional mTLS, embeds actix HTTP listeners for implants, `store::SqliteStore` for persistence.
 - `rb_client` - operator REPL (reedline). Talks to `rb_server`; reads one newline-delimited response per command. Completion/highlighting live in `rb_client/src/commands.rs`; history is `~/.rustbucket_history`.
 - `rb_implant` - Windows payload. HTTP check-in / poll / report loop.
@@ -43,7 +43,7 @@ Routing: `CommandRegistry::execute` treats a request as an implant command when 
 - Persisted listeners are re-bound by `RbServer::restore_listeners` at startup using their stored id. `listeners stop` deletes the record so it isn't restored. Persisted implants let an implant keep polling the same id across a restart; `get_tasks` reactivates its session.
 - The CA key (`certs/ca-key.pem`) persists and is reused, so issued operator certs stay valid across restarts. `operator new/list/revoke` live in `rb/src/command/server_cmds/operator.rs`; cert issuance goes through the `rb::pki::PkiAuthority` trait (implemented by `TestPki`) so `rcgen` stays out of `rb`. Revoked serials flow into the CRL, which the `CrlUpdater` refreshes and the client verifier enforces.
 - mTLS: start the server with `--mtls`; it writes the CA, client cert/key and CRL to `certs/` (created if missing). The client must match: `--mtls --host localhost --ca-path certs/ca-cert.pem --cert-path certs/client-cert.pem --key-path certs/client-key.pem`. `*.pem`/`*.der` are gitignored.
-- The server's mTLS path uses `tokio-rustls` 0.26 with `rustls` 0.23; `rb` stays TLS-free and `Client` in `rb/src/client.rs` is a metadata handle (id/addr/disconnect flag), not a stream. Transports are generic over `S: AsyncRead + AsyncWrite` in `server.rs::handle_client`.
+- The server's mTLS path uses `tokio-rustls` 0.26 with `rustls` 0.23; `rb` carries `rustls` 0.23 (ring-only) for the TLS listener, while `rb_server` keeps `rcgen`/SQLite and the implant builds its own reqwest rustls 0.21 client. `Client` in `rb/src/client.rs` is a metadata handle (id/addr/disconnect flag), not a stream. Transports are generic over `S: AsyncRead + AsyncWrite` in `server.rs::handle_client`.
 - `CommandOutput::File` carries bytes base64-encoded on the wire; the client writes it to its working directory. The `payload` command runs `cargo build` in `rb_payload_build` relative to the server's CWD, so the server must run from the repo root.
 - `upload` is client-side: the client reads the local file and sends base64 in `CommandRequest.data`, the server stores it on the `Task`, and the implant writes it. `Task.data`/`CommandRequest.data` are base64 on the wire (and in the tasks table). The implant's beacon interval lives in an `AtomicU64` the poll loop reads; `sleep` sets it plus optional jitter.
 - `*.sync-conflict-*` files at the root are Nextcloud sync artifacts, not source.

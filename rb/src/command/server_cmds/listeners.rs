@@ -246,7 +246,7 @@ impl RbCommand for ServerListenersCommand {
                                 }
 
                                 Ok(CommandOutput::Text(format!(
-                                    "HTTP listener '{}' starting on {}:{} (ID: {})",
+                                    "HTTPS listener '{}' starting on {}:{} (ID: {})",
                                     listener_name, bind_address, port, listener_id
                                 )))
                             }
