@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use rb::command::CommandRegistry;
 use rb::message::{CommandError, CommandRequest, CommandResult};
+use rb::pki::PkiAuthority;
 
 pub struct RbServer {
     config: RbServerConfig,
@@ -28,6 +29,7 @@ pub struct RbServer {
     // listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<dyn Listener>>>>>>,
     listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<HttpListener>>>>>>,
     store: Arc<dyn Store>,
+    pki: Arc<TestPki>,
     running: Arc<AtomicBool>,
     server_task: Mutex<Option<JoinHandle<()>>>,
     command_registry: Arc<CommandRegistry>,
@@ -36,6 +38,12 @@ pub struct RbServer {
 impl RbServer {
     /// Create a new RbServer instance with the given configuration and state store
     pub fn new(config: RbServerConfig, store: Arc<dyn Store>) -> Self {
+        // Load or create the CA once, so operator profiles stay valid across restarts.
+        let pki = Arc::new(TestPki::load_or_create(
+            &config.mtls.ca_path,
+            &config.mtls.ca_key_path,
+        ));
+
         RbServer {
             config,
             // clients: Arc::new(Mutex::new(Vec::new())),
@@ -43,6 +51,7 @@ impl RbServer {
             client_handlers: Arc::new(Mutex::new(Vec::new())),
             listeners: Arc::new(Mutex::new(HashMap::new())),
             store,
+            pki,
             running: Arc::new(AtomicBool::new(false)),
             server_task: Mutex::new(None),
             command_registry: Arc::new(CommandRegistry::new()),
@@ -123,6 +132,9 @@ impl RbServer {
         let running = self.running.clone();
         let clients = self.clients.clone();
         let store = self.store.clone();
+        let pki: Arc<dyn PkiAuthority> = self.pki.clone();
+        let server_host = self.config.host.clone();
+        let server_port = self.config.port;
         let command_registry = self.command_registry.clone();
         let listeners = self.listeners.clone();
         let client_handlers = self.client_handlers.clone();
@@ -145,6 +157,8 @@ impl RbServer {
 
                         let client_list = clients.clone();
                         let store = store.clone();
+                        let pki = pki.clone();
+                        let server_host = server_host.clone();
                         let running_clone = running.clone();
                         let command_registry_clone = command_registry.clone();
                         let listeners_clone = listeners.clone();
@@ -156,6 +170,9 @@ impl RbServer {
                                 client,
                                 client_list,
                                 store,
+                                pki,
+                                server_host,
+                                server_port,
                                 listeners_clone,
                                 running_clone,
                                 command_registry_clone,
@@ -189,23 +206,20 @@ impl RbServer {
 
     /// Start an mTLS server
     async fn start_mtls_server(&self, addr: &str) -> io::Result<()> {
-        // Generate PKI
-        let test_pki = Arc::new(TestPki::new());
-
-        // Write the certificates and keys to disk
-        test_pki.write_to_disk(
-            &self.config.mtls.ca_path,
+        // Write the shared client certificate/key and an initial CRL to disk.
+        self.pki.write_client_artifacts(
             &self.config.mtls.cert_path,
             &self.config.mtls.key_path,
             &self.config.mtls.crl_path,
             self.config.mtls.crl_update_seconds,
         );
 
-        // Start the CRL updater in a tokio task instead of a standard thread
+        // Start the CRL updater, which pulls revoked operator serials from the store.
         let crl_updater = CrlUpdater::new(
             std::time::Duration::from_secs(self.config.mtls.crl_update_seconds),
             self.config.mtls.crl_path.clone(),
-            test_pki.clone(),
+            self.pki.clone(),
+            self.store.clone(),
         );
         tokio::spawn(async move {
             // run is not async, so we don't await it
@@ -220,6 +234,10 @@ impl RbServer {
         let clients = self.clients.clone();
         // let sessions = self.sessions.clone();
         let store = self.store.clone();
+        let test_pki = self.pki.clone();
+        let pki: Arc<dyn PkiAuthority> = self.pki.clone();
+        let server_host = self.config.host.clone();
+        let server_port = self.config.port;
         let command_registry = self.command_registry.clone();
         let crl_path = self.config.mtls.crl_path.clone();
         let listeners = self.listeners.clone();
@@ -231,6 +249,8 @@ impl RbServer {
                         log::info!("New TLS connection attempt from: {}", addr);
 
                         let test_pki = test_pki.clone();
+                        let pki = pki.clone();
+                        let server_host = server_host.clone();
                         let crl_path = crl_path.clone();
 
                         // Process the TLS handshake in a separate task
@@ -266,6 +286,9 @@ impl RbServer {
                                 client,
                                 clients_clone,
                                 store,
+                                pki,
+                                server_host,
+                                server_port,
                                 listeners_clone,
                                 running_clone,
                                 command_registry_clone,
@@ -295,6 +318,9 @@ impl RbServer {
         // clients: Arc<Mutex<Vec<Client>>>,
         clients: Arc<DashMap<Uuid, Client>>,
         store: Arc<dyn Store>,
+        pki: Arc<dyn PkiAuthority>,
+        server_host: String,
+        server_port: u16,
         listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<HttpListener>>>>>>,
         running: Arc<AtomicBool>,
         command_registry: Arc<CommandRegistry>,
@@ -323,6 +349,9 @@ impl RbServer {
                     log::info!("Received: {:?}", msg);
                     let mut cmd_context = CommandContext {
                         store: store.clone(),
+                        pki: pki.clone(),
+                        server_host: server_host.clone(),
+                        server_port,
                         command_registry: command_registry.clone(),
                         listeners: listeners.clone(),
                     };

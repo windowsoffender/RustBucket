@@ -20,6 +20,7 @@ pub struct RbServerConfig {
 pub struct MtlsConfig {
     pub enabled: bool,
     pub ca_path: String,
+    pub ca_key_path: String,
     pub cert_path: String,
     pub key_path: String,
     pub crl_path: String,
@@ -43,6 +44,7 @@ impl Default for MtlsConfig {
         MtlsConfig {
             enabled: false,
             ca_path: "certs/ca-cert.pem".to_string(),
+            ca_key_path: "certs/ca-key.pem".to_string(),
             cert_path: "certs/client-cert.pem".to_string(),
             key_path: "certs/client-key.pem".to_string(),
             crl_path: "certs/crl.der".to_string(),

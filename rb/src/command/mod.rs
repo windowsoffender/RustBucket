@@ -1,6 +1,7 @@
 use crate::listener::http_listener::HttpListener;
 use crate::listener::*;
 use crate::message::{CommandError, CommandRequest, CommandResult};
+use crate::pki::PkiAuthority;
 use crate::store::Store;
 use std::any::Any;
 use std::collections::HashMap;
@@ -46,6 +47,9 @@ pub trait RbCommand: Send + Sync {
 // Context passed to commands (can contain server state, active session, etc.)
 pub struct CommandContext {
     pub store: Arc<dyn Store>,
+    pub pki: Arc<dyn PkiAuthority>,
+    pub server_host: String,
+    pub server_port: u16,
     // pub active_session: Option<Arc<Session>>,
     pub command_registry: Arc<CommandRegistry>,
     // pub listeners: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Box<dyn Listener>>>>>>, // Should switch to a generic listener type like this later
@@ -70,6 +74,7 @@ impl CommandRegistry {
         registry.register(Box::new(server_cmds::ServerSessionsCommand {}));
         registry.register(Box::new(server_cmds::ServerHelpCommand {}));
         registry.register(Box::new(server_cmds::PayloadCommand {}));
+        registry.register(Box::new(server_cmds::ServerOperatorCommand {}));
 
         registry
     }

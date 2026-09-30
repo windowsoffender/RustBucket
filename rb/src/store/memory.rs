@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use uuid::Uuid;
 
-use super::{ListenerInfo, Store, StoreError};
+use super::{ListenerInfo, OperatorInfo, Store, StoreError};
 use crate::message::ImplantInfo;
 use crate::session::{Session, SessionStatus};
 use crate::task::{Task, TaskResult, TaskStatus};
@@ -16,6 +16,7 @@ struct Inner {
     tasks: HashMap<Uuid, Task>,
     results: HashMap<Uuid, TaskResult>,
     listeners: HashMap<Uuid, ListenerInfo>,
+    operators: HashMap<String, OperatorInfo>,
     implant_to_session: HashMap<Uuid, usize>,
     next_id: usize,
 }
@@ -219,6 +220,40 @@ impl Store for MemoryStore {
     fn remove_listener(&self, id: &Uuid) -> bool {
         self.lock().listeners.remove(id).is_some()
     }
+
+    fn upsert_operator(&self, operator: OperatorInfo) -> Result<(), StoreError> {
+        self.lock().operators.insert(operator.name.clone(), operator);
+        Ok(())
+    }
+
+    fn get_operator(&self, name: &str) -> Option<OperatorInfo> {
+        self.lock().operators.get(name).cloned()
+    }
+
+    fn list_operators(&self) -> Vec<OperatorInfo> {
+        let mut operators: Vec<OperatorInfo> = self.lock().operators.values().cloned().collect();
+        operators.sort_by(|a, b| a.name.cmp(&b.name));
+        operators
+    }
+
+    fn set_operator_revoked(&self, name: &str, revoked: bool) -> bool {
+        match self.lock().operators.get_mut(name) {
+            Some(operator) => {
+                operator.revoked = revoked;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn revoked_operator_serials(&self) -> Vec<String> {
+        self.lock()
+            .operators
+            .values()
+            .filter(|operator| operator.revoked)
+            .map(|operator| operator.serial_hex.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -311,5 +346,25 @@ mod tests {
         assert_eq!(store.get_listener(&info.id).unwrap().port, 8080);
         assert!(store.remove_listener(&info.id));
         assert!(store.list_listeners().is_empty());
+    }
+
+    #[test]
+    fn operator_revocation() {
+        let store = MemoryStore::new();
+        store
+            .upsert_operator(OperatorInfo {
+                name: "alice".to_string(),
+                serial_hex: "0a0b".to_string(),
+                created_at: SystemTime::now(),
+                revoked: false,
+            })
+            .unwrap();
+
+        assert_eq!(store.list_operators().len(), 1);
+        assert!(store.revoked_operator_serials().is_empty());
+
+        assert!(store.set_operator_revoked("alice", true));
+        assert_eq!(store.revoked_operator_serials(), vec!["0a0b".to_string()]);
+        assert!(store.get_operator("alice").unwrap().revoked);
     }
 }

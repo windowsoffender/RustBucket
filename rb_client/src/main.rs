@@ -18,6 +18,18 @@ use rb::message::{CommandError, CommandOutput, CommandRequest};
 mod commands;
 mod utils;
 
+/// Connection settings loaded from an operator profile (TOML).
+#[derive(Deserialize, Default)]
+struct Profile {
+    host: Option<String>,
+    port: Option<u16>,
+    #[serde(default)]
+    mtls: bool,
+    ca_path: Option<String>,
+    cert_path: Option<String>,
+    key_path: Option<String>,
+}
+
 // Custom prompt implementation with the requested name
 struct RustBucketPrompt {
     // Current session ID if we're interacting with a session
@@ -100,20 +112,24 @@ fn main() -> io::Result<()> {
         .author("CaveiraGamingHD")
         .about("Command and Control Client for RustBucket Server")
         .arg(
+            Arg::new("profile")
+                .long("profile")
+                .value_name("FILE")
+                .help("Load connection settings from an operator profile (TOML)"),
+        )
+        .arg(
             Arg::new("host")
                 .short('H')
                 .long("host")
                 .value_name("HOST")
-                .help("C2 server hostname or IP address")
-                .default_value("localhost"),
+                .help("C2 server hostname or IP address [default: localhost]"),
         )
         .arg(
             Arg::new("port")
                 .short('p')
                 .long("port")
                 .value_name("PORT")
-                .help("C2 server port")
-                .default_value("6666"),
+                .help("C2 server port [default: 6666]"),
         )
         .arg(
             Arg::new("mtls")
@@ -126,35 +142,64 @@ fn main() -> io::Result<()> {
             Arg::new("ca-path")
                 .long("ca-path")
                 .value_name("CA_FILE")
-                .help("Path to CA certificate file")
-                .default_value("ca.pem"),
+                .help("Path to CA certificate file [default: ca.pem]"),
         )
         .arg(
             Arg::new("cert-path")
                 .long("cert-path")
                 .value_name("CERT_FILE")
-                .help("Path to client certificate file")
-                .default_value("client.pem"),
+                .help("Path to client certificate file [default: client.pem]"),
         )
         .arg(
             Arg::new("key-path")
                 .long("key-path")
                 .value_name("KEY_FILE")
-                .help("Path to client key file")
-                .default_value("client.key"),
+                .help("Path to client key file [default: client.key]"),
         )
         .get_matches();
 
+    // Load an operator profile if given. CLI flags override it.
+    let profile = match matches.get_one::<String>("profile") {
+        Some(path) => match load_profile(path) {
+            Ok(profile) => Some(profile),
+            Err(e) => {
+                eprintln!("Failed to load profile {}: {}", path, e);
+                return Ok(());
+            }
+        },
+        None => None,
+    };
+
     // Extract all needed values from matches to avoid lifetime issues
-    let host = matches.get_one::<String>("host").unwrap().clone();
-    let port = matches.get_one::<String>("port").unwrap().clone();
+    let host = matches
+        .get_one::<String>("host")
+        .cloned()
+        .or_else(|| profile.as_ref().and_then(|p| p.host.clone()))
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = matches
+        .get_one::<String>("port")
+        .cloned()
+        .or_else(|| profile.as_ref().and_then(|p| p.port.map(|p| p.to_string())))
+        .unwrap_or_else(|| "6666".to_string());
     let server_address = format!("{}:{}", host, port);
-    let use_mtls = matches.get_flag("mtls");
+    let use_mtls = matches.get_flag("mtls") || profile.as_ref().map(|p| p.mtls).unwrap_or(false);
 
     // Extract paths early if mTLS is enabled
-    let ca_path = matches.get_one::<String>("ca-path").unwrap().clone();
-    let cert_path = matches.get_one::<String>("cert-path").unwrap().clone();
-    let key_path = matches.get_one::<String>("key-path").unwrap().clone();
+    let ca_path = matches
+        .get_one::<String>("ca-path")
+        .cloned()
+        .or_else(|| profile.as_ref().and_then(|p| p.ca_path.clone()))
+        .unwrap_or_else(|| "ca.pem".to_string());
+    let cert_path = matches
+        .get_one::<String>("cert-path")
+        .cloned()
+        .or_else(|| profile.as_ref().and_then(|p| p.cert_path.clone()))
+        .unwrap_or_else(|| "client.pem".to_string());
+    let key_path = matches
+        .get_one::<String>("key-path")
+        .cloned()
+        .or_else(|| profile.as_ref().and_then(|p| p.key_path.clone()))
+        .unwrap_or_else(|| "client.key".to_string());
 
     // Connection type will be either plain TCP or mTLS
     enum ConnectionType {
@@ -281,11 +326,15 @@ fn main() -> io::Result<()> {
             }
         };
 
-        // Use the host string directly for DNS name creation
-        let server_name = rustls_pki_types::ServerName::DnsName(
-            rustls_pki_types::DnsName::try_from(host)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid DNS name"))?,
-        );
+        // Use the host string for the TLS server name, handling IP addresses.
+        let server_name = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            rustls_pki_types::ServerName::from(ip)
+        } else {
+            rustls_pki_types::ServerName::DnsName(
+                rustls_pki_types::DnsName::try_from(host.clone())
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid DNS name"))?,
+            )
+        };
 
         // Create TLS connection
         let client = ClientConnection::new(config, server_name)
@@ -544,4 +593,10 @@ fn history_path() -> std::path::PathBuf {
         Ok(home) => std::path::PathBuf::from(home).join(".rustbucket_history"),
         Err(_) => std::path::PathBuf::from(".rustbucket_history"),
     }
+}
+
+/// Load an operator profile from a TOML file.
+fn load_profile(path: &str) -> Result<Profile, Box<dyn std::error::Error>> {
+    let contents = std::fs::read_to_string(path)?;
+    Ok(toml::from_str(&contents)?)
 }

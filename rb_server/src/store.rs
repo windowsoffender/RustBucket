@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use rb::message::{CommandOutput, ImplantInfo};
 use rb::session::{Session, SessionStatus};
-use rb::store::{ListenerInfo, Store, StoreError};
+use rb::store::{ListenerInfo, OperatorInfo, Store, StoreError};
 use rb::task::{Task, TaskResult, TaskStatus};
 
 const SCHEMA: &str = r#"
@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS listeners (
     bind_address  TEXT NOT NULL,
     port          INTEGER NOT NULL,
     created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS operators (
+    name       TEXT PRIMARY KEY,
+    serial_hex TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    revoked    INTEGER NOT NULL
 );
 "#;
 
@@ -229,6 +236,15 @@ fn row_to_listener(row: &Row<'_>) -> rusqlite::Result<ListenerInfo> {
         bind_address: row.get(3)?,
         port: row.get::<_, i64>(4)? as u16,
         created_at: unix_to_system_time(row.get(5)?),
+    })
+}
+
+fn row_to_operator(row: &Row<'_>) -> rusqlite::Result<OperatorInfo> {
+    Ok(OperatorInfo {
+        name: row.get(0)?,
+        serial_hex: row.get(1)?,
+        created_at: unix_to_system_time(row.get(2)?),
+        revoked: row.get::<_, i64>(3)? != 0,
     })
 }
 
@@ -572,6 +588,72 @@ impl Store for SqliteStore {
             .map(|n| n > 0)
             .unwrap_or(false)
     }
+
+    fn upsert_operator(&self, operator: OperatorInfo) -> Result<(), StoreError> {
+        self.conn()
+            .execute(
+                "INSERT OR REPLACE INTO operators (name, serial_hex, created_at, revoked)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    operator.name,
+                    operator.serial_hex,
+                    system_time_to_unix(operator.created_at),
+                    operator.revoked as i64
+                ],
+            )
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    fn get_operator(&self, name: &str) -> Option<OperatorInfo> {
+        self.conn()
+            .query_row(
+                "SELECT name, serial_hex, created_at, revoked FROM operators WHERE name = ?1",
+                params![name],
+                row_to_operator,
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    fn list_operators(&self) -> Vec<OperatorInfo> {
+        let conn = self.conn();
+        let mut stmt = match conn
+            .prepare("SELECT name, serial_hex, created_at, revoked FROM operators ORDER BY name")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], row_to_operator);
+        match rows {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn set_operator_revoked(&self, name: &str, revoked: bool) -> bool {
+        self.conn()
+            .execute(
+                "UPDATE operators SET revoked = ?1 WHERE name = ?2",
+                params![revoked as i64, name],
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
+    fn revoked_operator_serials(&self) -> Vec<String> {
+        let conn = self.conn();
+        let mut stmt = match conn.prepare("SELECT serial_hex FROM operators WHERE revoked = 1") {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0));
+        match rows {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -680,6 +762,33 @@ mod tests {
             let listener = store.get_listener(&id).expect("listener should persist");
             assert_eq!(listener.port, 8080);
             assert_eq!(store.list_listeners().len(), 1);
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn operators_survive_reopen() {
+        let path = std::env::temp_dir().join(format!("rb_op_test_{}.sqlite", Uuid::new_v4()));
+        let path_str = path.to_str().unwrap().to_string();
+
+        {
+            let store = SqliteStore::open(&path_str).unwrap();
+            store
+                .upsert_operator(OperatorInfo {
+                    name: "alice".to_string(),
+                    serial_hex: "abcd".to_string(),
+                    created_at: SystemTime::now(),
+                    revoked: false,
+                })
+                .unwrap();
+            assert!(store.set_operator_revoked("alice", true));
+        }
+
+        {
+            let store = SqliteStore::open(&path_str).unwrap();
+            assert!(store.get_operator("alice").unwrap().revoked);
+            assert_eq!(store.revoked_operator_serials(), vec!["abcd".to_string()]);
         }
 
         let _ = std::fs::remove_file(&path);

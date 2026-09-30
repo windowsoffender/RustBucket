@@ -11,9 +11,10 @@ db_path = "rustbucket.sqlite"
 
 [mtls]
 # Require a client certificate on the operator channel.
-# The server generates a throwaway test PKI into the paths below at startup.
+# The CA key is generated once and reused, so issued operator profiles stay valid across restarts.
 enabled = true
 ca_path = "certs/ca-cert.pem"
+ca_key_path = "certs/ca-key.pem"
 cert_path = "certs/client-cert.pem"
 key_path = "certs/client-key.pem"
 crl_path = "certs/crl.der"

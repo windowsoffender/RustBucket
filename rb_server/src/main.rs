@@ -40,6 +40,10 @@ struct Args {
     #[arg(long)]
     ca_path: Option<String>,
 
+    /// Path to the CA key (written once, then reused)
+    #[arg(long)]
+    ca_key_path: Option<String>,
+
     /// Path to the client certificate (written at startup)
     #[arg(long)]
     cert_path: Option<String>,
@@ -86,6 +90,9 @@ async fn main() {
     }
     if let Some(path) = args.ca_path {
         conf.mtls.ca_path = path;
+    }
+    if let Some(path) = args.ca_key_path {
+        conf.mtls.ca_key_path = path;
     }
     if let Some(path) = args.cert_path {
         conf.mtls.cert_path = path;

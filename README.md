@@ -80,7 +80,7 @@ This will connect to the default server on localhost:6666. You can change the co
 
 # Configuration
 
-The server reads `rb_server.toml` from the current directory by default. Pass `--config <file>` to use a different one. Any CLI flag (`--host`, `--port`, `--mtls`, `--ca-path`, `--cert-path`, `--key-path`, `--crl-path`) overrides the file. A missing default file is fine, the built-in defaults are used.
+The server reads `rb_server.toml` from the current directory by default. Pass `--config <file>` to use a different one. Any CLI flag (`--host`, `--port`, `--mtls`, `--ca-path`, `--ca-key-path`, `--cert-path`, `--key-path`, `--crl-path`) overrides the file. A missing default file is fine, the built-in defaults are used.
 
 ```toml
 host = "0.0.0.0"
@@ -91,6 +91,7 @@ db_path = "rustbucket.sqlite"
 [mtls]
 enabled = false
 ca_path = "certs/ca-cert.pem"
+ca_key_path = "certs/ca-key.pem"
 cert_path = "certs/client-cert.pem"
 key_path = "certs/client-key.pem"
 crl_path = "certs/crl.der"
@@ -98,6 +99,8 @@ crl_update_seconds = 5
 ```
 
 Sessions, tasks, results and listener definitions are saved to the SQLite database at `db_path`, so they survive a restart. HTTP listeners are automatically bound again on startup. Set `db_path = ""` to keep everything in memory.
+
+The CA key at `ca_key_path` is generated once and reused, so certificates issued to operators stay valid across restarts.
 
 # Implant commands
 
@@ -110,7 +113,20 @@ Once an implant has checked in, attach to it from the client with `sessions use 
 
 Commands run natively on the implant and anything else is rejected. There is no shell.
 
+# Operator profiles
+
+The server issues per-operator client certificates signed by its CA.
+
+- `operator new <name> [--host <host>] [--port <port>]` writes `operators/<name>/client-cert.pem`, `operators/<name>/client-key.pem` and a profile at `operators/<name>.toml`.
+- `operator list` lists profiles and whether they are revoked.
+- `operator revoke <name>` revokes a profile; the server's CRL updater rejects it within a few seconds.
+
+Connect with an issued profile (CLI flags override it):
+
+```bash
+./rb_client --profile operators/<name>.toml
+```
+
 # TODO
 
-- Operator profiles and a command to generate them.
 - Make server send the generated payload to the client (currently it just stays on the server).

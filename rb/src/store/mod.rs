@@ -40,6 +40,16 @@ pub struct ListenerInfo {
     pub created_at: SystemTime,
 }
 
+/// An operator profile issued by the server's CA.
+#[derive(Debug, Clone)]
+pub struct OperatorInfo {
+    pub name: String,
+    /// Certificate serial number as lowercase hex, used for revocation.
+    pub serial_hex: String,
+    pub created_at: SystemTime,
+    pub revoked: bool,
+}
+
 /// Persistent and in-memory state for the C2.
 ///
 /// All methods are synchronous: SQLite is fast enough locally that the async callers don't need an
@@ -127,4 +137,21 @@ pub trait Store: Send + Sync {
 
     /// Remove a listener record. Returns whether it existed.
     fn remove_listener(&self, id: &Uuid) -> bool;
+
+    // Operators
+
+    /// Insert or replace an operator profile record.
+    fn upsert_operator(&self, operator: OperatorInfo) -> Result<(), StoreError>;
+
+    /// Look up an operator by name.
+    fn get_operator(&self, name: &str) -> Option<OperatorInfo>;
+
+    /// List all operator profiles.
+    fn list_operators(&self) -> Vec<OperatorInfo>;
+
+    /// Mark an operator as revoked (or not). Returns whether it existed.
+    fn set_operator_revoked(&self, name: &str, revoked: bool) -> bool;
+
+    /// Serial numbers (lowercase hex) of every revoked operator, for the CRL.
+    fn revoked_operator_serials(&self) -> Vec<String>;
 }

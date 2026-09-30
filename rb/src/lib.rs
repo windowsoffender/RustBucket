@@ -2,6 +2,7 @@ pub mod client;
 pub mod command;
 pub mod listener;
 pub mod message;
+pub mod pki;
 pub mod session;
 pub mod store;
 pub mod task;
