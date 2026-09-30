@@ -106,12 +106,21 @@ The CA key at `ca_key_path` is generated once and reused, so certificates issued
 
 Once an implant has checked in, attach to it from the client with `sessions use <id>` and run one of:
 
-- `pwd` - print the implant's working directory
-- `ls [path]` - list a directory
-- `cat <file>` - print a file's contents
-- `systeminfo` - show system information
+File management:
+- `pwd`, `cd <path>` - working directory
+- `ls [path]`, `cat <file>`, `download <file>` (sends the file back to the operator)
+- `mkdir <dir>`, `rm [-r] <path>`, `mv <src> <dst>`, `cp [-r] <src> <dst>`, `touch <file>`
 
-Commands run natively on the implant and anything else is rejected. There is no shell.
+System:
+- `systeminfo`, `whoami`, `env`, `ps`, `kill <pid>`, `sleep <seconds>`
+
+Network:
+- `netstat`, `ipconfig`
+
+Execution:
+- `shell <command>` - run a command through powershell on Windows, sh elsewhere
+
+Commands run natively on the implant. Unknown commands are rejected, and there is no implicit shell fallback; use `shell` to run arbitrary commands explicitly.
 
 # Operator profiles
 
